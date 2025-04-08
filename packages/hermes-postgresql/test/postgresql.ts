@@ -1,4 +1,4 @@
-import { swallow } from '@arturwojnar/hermes'
+import { swallow } from '@chassisjs/hermes'
 import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers/postgresql'
 import wrapper from 'postgres'
 

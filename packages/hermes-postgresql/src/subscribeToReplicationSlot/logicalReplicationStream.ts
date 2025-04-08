@@ -1,6 +1,6 @@
 /* -eslint-disable  @typescript-eslint/no-unused-vars  */
 
-import { Duration, noop, swallow } from '@arturwojnar/hermes'
+import { Duration, noop, swallow } from '@chassisjs/hermes'
 import { pipe } from 'fp-ts/lib/function.js'
 import { setTimeout } from 'node:timers/promises'
 import postgres from 'postgres'

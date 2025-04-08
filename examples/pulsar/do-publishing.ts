@@ -1,4 +1,4 @@
-import { OutboxConsumer } from '@arturwojnar/hermes-mongodb'
+import { OutboxConsumer } from '@chassisjs/hermes-mongodb'
 import { ObjectId } from 'mongodb'
 import { setTimeout } from 'node:timers/promises'
 import { MedicineEvent } from '../common/events'

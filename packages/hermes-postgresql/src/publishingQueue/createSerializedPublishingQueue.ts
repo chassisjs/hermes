@@ -1,4 +1,4 @@
-import { assertNever, CancellationPromise, Duration, noop } from '@arturwojnar/hermes'
+import { assertNever, CancellationPromise, Duration, noop } from '@chassisjs/hermes'
 import { setTimeout } from 'node:timers/promises'
 import { Lsn } from '../common/lsn.js'
 import { Transaction } from '../subscribeToReplicationSlot/types.js'

@@ -1,4 +1,4 @@
-import { assert } from '@arturwojnar/hermes'
+import { assert } from '@chassisjs/hermes'
 import { Db, ObjectId, type Document } from 'mongodb'
 import { OutboxConsumersCollectionName } from './consts.js'
 import { type OutboxConsumerModel } from './typings.js'

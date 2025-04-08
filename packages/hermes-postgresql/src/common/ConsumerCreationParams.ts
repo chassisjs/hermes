@@ -1,4 +1,4 @@
-import { Duration } from '@arturwojnar/hermes'
+import { Duration } from '@chassisjs/hermes'
 import { JSONValue, Options, PostgresType } from 'postgres'
 import { AsyncOrSync } from 'ts-essentials'
 import { UseAsyncOutboxPolicy } from '../policies/useBasicAsyncStoragePolicy.js'

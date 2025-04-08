@@ -1,4 +1,4 @@
-import { Duration } from '@arturwojnar/hermes'
+import { Duration } from '@chassisjs/hermes'
 import { MessageToPublish } from '../publishingQueue.js'
 
 type StateMessage<InsertResult> = MessageToPublish<InsertResult> & { delivered: boolean; failed: boolean }

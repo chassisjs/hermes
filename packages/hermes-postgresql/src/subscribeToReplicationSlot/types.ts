@@ -1,4 +1,4 @@
-import { NonEmptyString } from '@arturwojnar/hermes'
+import { NonEmptyString } from '@chassisjs/hermes'
 import { type SlotName } from '../common/consts.js'
 import type { Lsn } from '../common/lsn.js'
 

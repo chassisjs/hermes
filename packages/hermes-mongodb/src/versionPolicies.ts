@@ -1,4 +1,4 @@
-import { NotSupportedMongoVersionError, parseSemVer } from '@arturwojnar/hermes'
+import { NotSupportedMongoVersionError, parseSemVer } from '@chassisjs/hermes'
 import { Db, Document } from 'mongodb'
 import { SupportedMajorMongoVersions } from './consts.js'
 

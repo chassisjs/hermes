@@ -1,4 +1,4 @@
-import { Duration } from '@arturwojnar/hermes'
+import { Duration } from '@chassisjs/hermes'
 import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals'
 import { setTimeout } from 'node:timers/promises'
 import postgres, { JSONValue } from 'postgres'

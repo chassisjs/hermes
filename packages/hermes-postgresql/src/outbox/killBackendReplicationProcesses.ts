@@ -1,4 +1,4 @@
-import { swallow } from '@arturwojnar/hermes'
+import { swallow } from '@chassisjs/hermes'
 import { Sql } from 'postgres'
 import { SlotName } from '../common/consts.js'
 

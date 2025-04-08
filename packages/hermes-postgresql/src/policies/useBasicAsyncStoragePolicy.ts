@@ -1,4 +1,4 @@
-import { Duration, literalObject } from '@arturwojnar/hermes'
+import { Duration, literalObject } from '@chassisjs/hermes'
 import { JSONValue } from 'postgres'
 import {
   createAsyncOutboxConsumer,

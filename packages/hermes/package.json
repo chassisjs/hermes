@@ -1,5 +1,5 @@
 {
-  "name": "@arturwojnar/hermes",
+  "name": "@chassisjs/hermes",
   "version": "1.0.0-alpha.12",
   "description": "Production-Ready TypeScript Outbox Pattern",
   "type": "module",
@@ -30,11 +30,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/arturwojnar/hermes.git",
+    "url": "git+https://github.com/chassisjs/hermes.git",
     "directory": "packages/hermes"
   },
   "bugs": {
-    "url": "https://github.com/arturwojnar/hermes/issues"
+    "url": "https://github.com/chassisjs/hermes/issues"
   },
   "homepage": "https://docs.hermesjs.tech",
   "imports": {

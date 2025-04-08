@@ -1,9 +1,9 @@
-import { assert, literalObject } from '@arturwojnar/hermes'
+import { assert, literalObject } from '@chassisjs/hermes'
 import { TransactionSql } from 'postgres'
 import { Prettify } from 'ts-essentials'
+import { getSlotName } from '../common/consts.js'
 import { convertLsnToBigInt, Lsn, toLsn } from '../common/lsn.js'
 import { HermesSql } from '../common/types.js'
-import { getSlotName } from '../common/consts.js'
 
 type BaseOutboxConsumerModel = {
   id: number

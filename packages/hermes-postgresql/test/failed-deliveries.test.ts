@@ -1,5 +1,5 @@
 // import { OutboxConsumersCollectionName, OutboxMessagesCollectionName } from '../src/consts.js'
-import { Duration } from '@arturwojnar/hermes'
+import { Duration } from '@chassisjs/hermes'
 import { describe, expect, jest, test } from '@jest/globals'
 import { setTimeout } from 'node:timers/promises'
 import { convertLsnToBigInt, Lsn } from '../src/common/lsn.js'

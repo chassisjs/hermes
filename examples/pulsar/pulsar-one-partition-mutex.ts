@@ -1,5 +1,5 @@
-import { addDisposeOnSigterm } from '@arturwojnar/hermes'
-import { createOutboxConsumer } from '@arturwojnar/hermes-mongodb'
+import { addDisposeOnSigterm } from '@chassisjs/hermes'
+import { createOutboxConsumer } from '@chassisjs/hermes-mongodb'
 import { swallow } from '../../packages/hermes/src/utils'
 import { MedicineEvent } from '../common/events'
 import { MongoClient } from '../node_modules/mongodb/mongodb'

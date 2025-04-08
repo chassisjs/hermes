@@ -2,9 +2,9 @@
   "include": ["./common/**/*", "./postgresql/**/*"],
   "compilerOptions": {
     "paths": {
-      "@arturwojnar/hermes": ["../packages/hermes"],
-      "@arturwojnar/hermes-postgresql": ["../packages/hermes-postgresql"],
-      "@arturwojnar/hermes-mongodb": ["../packages/hermes-mongodb"]
+      "@chassisjs/hermes": ["../packages/hermes"],
+      "@chassisjs/hermes-postgresql": ["../packages/hermes-postgresql"],
+      "@chassisjs/hermes-mongodb": ["../packages/hermes-mongodb"]
     },
     /* Visit https://aka.ms/tsconfig.json to read more about this file */
 

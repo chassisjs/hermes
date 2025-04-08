@@ -1,6 +1,6 @@
-[![Build and test](https://github.com/arturwojnar/hermes/actions/workflows/build-and-test.yaml/badge.svg?branch=main)](https://github.com/arturwojnar/hermes/actions/workflows/build-and-test.yaml)
-[![Deploy VitePress site to Pages](https://github.com/arturwojnar/hermes/actions/workflows/publish-docs.yaml/badge.svg)](https://github.com/arturwojnar/hermes/actions/workflows/publish-docs.yaml)
-[![Publish to NPM](https://github.com/arturwojnar/hermes/actions/workflows/publish.yaml/badge.svg)](https://github.com/arturwojnar/hermes/actions/workflows/publish.yaml)
+[![Build and test](https://github.com/chassisjs/hermes/actions/workflows/build-and-test.yaml/badge.svg?branch=main)](https://github.com/chassisjs/hermes/actions/workflows/build-and-test.yaml)
+[![Deploy VitePress site to Pages](https://github.com/chassisjs/hermes/actions/workflows/publish-docs.yaml/badge.svg)](https://github.com/chassisjs/hermes/actions/workflows/publish-docs.yaml)
+[![Publish to NPM](https://github.com/chassisjs/hermes/actions/workflows/publish.yaml/badge.svg)](https://github.com/chassisjs/hermes/actions/workflows/publish.yaml)
 
 <img src="./docs/public/logo-main.png" alt="Hermes logo" style="margin: 0 auto; width: 70%; display: block;" />
 <br />
@@ -33,13 +33,13 @@ The Outbox pattern makes an atomic operation from a database operation (e.g. mod
 If you work with **PostgreSQL**, then:
 
 ```bash
-npm i @arturwojnar/hermes @arturwojnar/hermes-postgresql
+npm i @chassisjs/hermes @chassisjs/hermes-postgresql
 ```
 
 If you work with **MongoDB**, then:
 
 ```bash
-npm i @arturwojnar/hermes @arturwojnar/hermes-mongodb
+npm i @chassisjs/hermes @chassisjs/hermes-mongodb
 ```
 
 ## 📌 Examples
@@ -62,7 +62,7 @@ Visit **Hermes** [docs](https://docs.hermesjs.tech/).
 
 ## 💬 Discussions
 
-Head over to the [discussions](https://github.com/arturwojnar/hermes/discussions) to share your ideas.
+Head over to the [discussions](https://github.com/chassisjs/hermes/discussions) to share your ideas.
 
 ## 🤝 Thanks
 

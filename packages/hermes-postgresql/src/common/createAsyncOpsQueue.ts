@@ -1,4 +1,4 @@
-import { CancellationPromise } from '@arturwojnar/hermes'
+import { CancellationPromise } from '@chassisjs/hermes'
 import { createSimpleQueue } from './createSimpleQueue.js'
 
 type Item<T = unknown> = () => Promise<T>

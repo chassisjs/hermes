@@ -1,4 +1,4 @@
-import { createOutboxConsumer } from '@arturwojnar/hermes-mongodb'
+import { createOutboxConsumer } from '@chassisjs/hermes-mongodb'
 import { MongoDBContainer } from '@testcontainers/mongodb'
 import chalk from 'chalk'
 import cors from 'cors'

@@ -1,4 +1,4 @@
-import { assert, Duration, swallow } from '@arturwojnar/hermes'
+import { assert, Duration, swallow } from '@chassisjs/hermes'
 import { setTimeout } from 'node:timers/promises'
 import postgres, { JSONValue, Options, PostgresType, Sql, TransactionSql } from 'postgres'
 import { getSlotName, PublicationName } from '../common/consts.js'

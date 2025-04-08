@@ -16,9 +16,9 @@
     "composite": false,
     "noEmit": true,
     "paths": {
-      "@arturwojnar/hermes": ["./packages/hermes/src"],
-      "@arturwojnar/hermes-mongodb": ["./packages/hermes-mongodb/src"],
-      "@arturwojnar/hermes-postgresql": ["./packages/hermes-postgresql/src"]
+      "@chassisjs/hermes": ["./packages/hermes/src"],
+      "@chassisjs/hermes-mongodb": ["./packages/hermes-mongodb/src"],
+      "@chassisjs/hermes-postgresql": ["./packages/hermes-postgresql/src"]
     }
   },
   "references": [

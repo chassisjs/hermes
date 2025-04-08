@@ -1,4 +1,4 @@
-import { CancellationPromise, Duration } from '@arturwojnar/hermes'
+import { CancellationPromise, Duration } from '@chassisjs/hermes'
 import { createAsyncOpsQueue } from '../../common/createAsyncOpsQueue.js'
 import { Lsn } from '../../common/lsn.js'
 import { MessageToPublish, PublishingQueue, PublishingQueueOptions } from '../publishingQueue.js'

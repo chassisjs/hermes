@@ -1,4 +1,4 @@
-import { HermesError } from '@arturwojnar/hermes'
+import { HermesError } from '@chassisjs/hermes'
 import { DeepReadonly } from 'ts-essentials'
 
 enum HermesErrorCode {

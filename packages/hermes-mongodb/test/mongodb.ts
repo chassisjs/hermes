@@ -1,4 +1,4 @@
-import { swallow } from '@arturwojnar/hermes'
+import { swallow } from '@chassisjs/hermes'
 import { Db, MongoClient, ObjectId } from 'mongodb'
 import { MongoMemoryReplSet } from 'mongodb-memory-server'
 import { setInterval } from 'node:timers/promises'

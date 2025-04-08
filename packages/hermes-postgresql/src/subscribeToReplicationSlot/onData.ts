@@ -1,4 +1,4 @@
-import { assertNever } from '@arturwojnar/hermes'
+import { assertNever } from '@chassisjs/hermes'
 import { XLogData_WalRecordStartByteNumber } from './consts.js'
 import { processBeginMessage } from './processBeginMessage.js'
 import { processCommitMessage } from './processCommitMessage.js'

@@ -36,7 +36,7 @@ const options = [
       resolve(),
       commonjs(),
     ],
-    external: ['@arturwojnar/hermes', 'postgres'],
+    external: ['@chassisjs/hermes', 'postgres'],
     onwarn(warning, warn) {
       // Fail on TS errors
       if (warning.code === 'PLUGIN_WARNING' && warning.plugin === 'typescript') {

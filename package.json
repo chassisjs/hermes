@@ -1,5 +1,5 @@
 {
-  "name": "@arturwojnar/core",
+  "name": "@chassisjs/core",
   "version": "0.0.1",
   "description": "Production-Ready TypeScript Outbox Pattern",
   "main": "./lib/index.cjs",
@@ -16,12 +16,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git@github.com:arturwojnar/hermes.git"
+    "url": "git@github.com:chassisjs/hermes.git"
   },
   "bugs": {
-    "url": "https://github.com/arturwojnar/hermes/issues"
+    "url": "https://github.com/chassisjs/hermes/issues"
   },
-  "homepage": "https://github.com/arturwojnar/hermes#readme",
+  "homepage": "https://github.com/chassisjs/hermes#readme",
   "scripts": {
     "prepare": "husky",
     "build": "npm run build:ts && npm run build --ws",
@@ -120,15 +120,15 @@
     "tsconfig-paths": "~4.2.0"
   },
   "exports": {
-    "@arturwojnar/hermes": {
+    "@chassisjs/hermes": {
       "import": "./packages/hermes/src/index.ts",
       "types": "./packages/hermes/src/index.ts"
     },
-    "@arturwojnar/hermes-mongodb": {
+    "@chassisjs/hermes-mongodb": {
       "import": "./packages/hermes-mongodb/src/index.ts",
       "types": "./packages/hermes-mongodb/src/index.ts"
     },
-    "@arturwojnar/hermes-postgresql": {
+    "@chassisjs/hermes-postgresql": {
       "import": "./packages/hermes-postgresql/src/index.ts",
       "types": "./packages/hermes-postgresql/src/index.ts"
     }

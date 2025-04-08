@@ -1,4 +1,4 @@
-import { Duration } from '@arturwojnar/hermes'
+import { Duration } from '@chassisjs/hermes'
 import { describe, expect, it, jest } from '@jest/globals'
 import { setTimeout as setTimeoutCallback } from 'timers'
 import { setTimeout } from 'timers/promises'

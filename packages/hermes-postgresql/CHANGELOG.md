@@ -1,6 +1,6 @@
 # Change Log
 
-# [1.0.0-alpha.8](https://github.com/arturwojnar/hermes/compare/v1.0.0-alpha.9...v1.0.0-alpha.10) (2025-03-08)
+# [1.0.0-alpha.8](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.9...v1.0.0-alpha.10) (2025-03-08)
 
 Greetings! 😍 🎉
 
@@ -29,7 +29,7 @@ const outbox = createOutboxConsumer<RegisterPatientEvent>({
 })
 ```
 
-# [1.0.0-alpha.8](https://github.com/arturwojnar/hermes/compare/@arturwojnar/hermes-postgresql@1.0.0-alpha.7...@arturwojnar/hermes-postgresql@1.0.0-alpha.8) (2025-02-24)
+# [1.0.0-alpha.8](https://github.com/chassisjs/hermes/compare/@chassisjs/hermes-postgresql@1.0.0-alpha.7...@chassisjs/hermes-postgresql@1.0.0-alpha.8) (2025-02-24)
 
 First release of the Hermes PostgreSQL! 😍 🎉
 
@@ -41,7 +41,7 @@ _You don't have to pray for the gifts of nature. Just run npm and type:_
 npm i hermes hermes-postgresql
 ```
 
-If you look for a full example, then [here you go](https://github.com/arturwojnar/hermes/blob/main/examples/postgresql/patient-registration/index.ts)! 🎉🎉🎉
+If you look for a full example, then [here you go](https://github.com/chassisjs/hermes/blob/main/examples/postgresql/patient-registration/index.ts)! 🎉🎉🎉
 
 ### Features
 
@@ -65,8 +65,8 @@ Check an example how to use the _PostgreSQL Logical Replication_:
 
 ```typescript
 import { DeepReadonly } from 'ts-essentials'
-import { addDisposeOnSigterm, type Flavour } from '@arturwojnar/hermes'
-import { type HermesMessageEnvelope, type MessageEnvelope, createOutboxConsumer } from '@arturwojnar/hermes-postgresql'
+import { addDisposeOnSigterm, type Flavour } from '@chassisjs/hermes'
+import { type HermesMessageEnvelope, type MessageEnvelope, createOutboxConsumer } from '@chassisjs/hermes-postgresql'
 
 /* Types definition */
 type DomainEvent<
@@ -188,7 +188,7 @@ If you'd like to perform, e.g. a _compensation_, then you can use a special _Her
 That's so that we don't occupy _PostgreSQL WAL_ when it's not needed.
 
 ```typescript
-import { useBasicAsyncOutboxConsumerPolicy } from '@arturwojnar/hermes-postgresql'
+import { useBasicAsyncOutboxConsumerPolicy } from '@chassisjs/hermes-postgresql'
 
 const outbox = createOutboxConsumer<RegisterPatientEvent>({
   // ...rest the same as before

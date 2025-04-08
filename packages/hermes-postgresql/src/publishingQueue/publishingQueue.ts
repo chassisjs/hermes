@@ -1,4 +1,4 @@
-import { CancellationPromise, Duration } from '@arturwojnar/hermes'
+import { CancellationPromise, Duration } from '@chassisjs/hermes'
 import { DeepReadonly } from 'ts-essentials'
 import { Transaction } from '../subscribeToReplicationSlot/types.js'
 

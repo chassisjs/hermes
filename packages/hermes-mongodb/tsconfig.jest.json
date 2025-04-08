@@ -15,8 +15,8 @@
     "preserveConstEnums": true,
     "sourceMap": true,
     "paths": {
-      "@arturwojnar/hermes": ["../hermes"],
-      "@arturwojnar/hermes-mongodb": ["./"]
+      "@chassisjs/hermes": ["../hermes"],
+      "@chassisjs/hermes-mongodb": ["./"]
     }
   },
   "references": [

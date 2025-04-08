@@ -1,4 +1,4 @@
-import { CancellationPromise, addDisposeOnSigterm, assertDate, isNil, swallow } from '@arturwojnar/hermes'
+import { CancellationPromise, addDisposeOnSigterm, assertDate, isNil, swallow } from '@chassisjs/hermes'
 import { ClientSession, Db, MongoClient, ObjectId } from 'mongodb'
 import { setTimeout } from 'node:timers/promises'
 import { noop } from 'ts-essentials'

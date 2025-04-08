@@ -1,4 +1,4 @@
-import { Duration, swallow } from '@arturwojnar/hermes'
+import { Duration, swallow } from '@chassisjs/hermes'
 import { expect, jest, test } from '@jest/globals'
 import nodeTimersPromises from 'node:timers/promises'
 import { OutboxMessagesCollectionName } from '../src/consts.js'

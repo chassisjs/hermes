@@ -1,4 +1,4 @@
-import { Duration } from '@arturwojnar/hermes'
+import { Duration } from '@chassisjs/hermes'
 import { JSONValue, Sql, TransactionSql } from 'postgres'
 import { AsyncOrSync } from 'ts-essentials'
 import { HermesSql, MessageEnvelope, Stop } from '../common/types.js'

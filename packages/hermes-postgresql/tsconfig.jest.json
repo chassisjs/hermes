@@ -15,8 +15,8 @@
     "preserveConstEnums": true,
     "sourceMap": true,
     "paths": {
-      "@arturwojnar/hermes": ["../hermes"],
-      "@arturwojnar/hermes-postgresql": ["./"]
+      "@chassisjs/hermes": ["../hermes"],
+      "@chassisjs/hermes-postgresql": ["./"]
     }
   },
   "references": [

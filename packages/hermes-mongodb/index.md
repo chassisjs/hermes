@@ -1,7 +1,7 @@
 ## ⚙️ Install
 
 ```bash
-npm i @arturwojnar/hermes @arturwojnar/hermes-mongodb
+npm i @chassisjs/hermes @chassisjs/hermes-mongodb
 ```
 
 ## 😍 Supported versions of the MongoDB
@@ -11,7 +11,7 @@ npm i @arturwojnar/hermes @arturwojnar/hermes-mongodb
 ➡️ **7**.x.x 😛\
 ➡️ **8**.0.0-rc.x 😎
 
-If you don't belive it, check how these☝️ versions are covered by tests [here](https://github.com/arturwojnar/hermes/blob/main/packages/hermes-mongodb/test/simple.test.ts#L14)!
+If you don't belive it, check how these☝️ versions are covered by tests [here](https://github.com/chassisjs/hermes/blob/main/packages/hermes-mongodb/test/simple.test.ts#L14)!
 
 ## 📒 API
 

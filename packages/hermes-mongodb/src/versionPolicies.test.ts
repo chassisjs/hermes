@@ -1,4 +1,4 @@
-import { NotSupportedMongoVersionError } from '@arturwojnar/hermes'
+import { NotSupportedMongoVersionError } from '@chassisjs/hermes'
 import { describe, expect, it, jest } from '@jest/globals'
 import { Db } from 'mongodb'
 import { BuildInfo, generateVersionPolicies } from './versionPolicies.js'

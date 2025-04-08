@@ -1,4 +1,4 @@
-import { assert } from '@arturwojnar/hermes'
+import { assert } from '@chassisjs/hermes'
 import type { Offset } from '../common/offset.js'
 import { offset } from '../common/offset.js'
 import type { ColumnConfig, ColumnType, OnDataProcessingResult } from './types.js'

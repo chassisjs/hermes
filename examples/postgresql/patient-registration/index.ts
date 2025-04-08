@@ -7,13 +7,13 @@ import {
   literalObject,
   parseUuid4,
   swallow,
-} from '@arturwojnar/hermes'
+} from '@chassisjs/hermes'
 import {
   type HermesMessageEnvelope,
   type MessageEnvelope,
   createOutboxConsumer,
   useBasicAsyncOutboxConsumerPolicy,
-} from '@arturwojnar/hermes-postgresql'
+} from '@chassisjs/hermes-postgresql'
 import { Command, DefaultCommandMetadata, DefaultRecord, Event, getInMemoryMessageBus } from '@event-driven-io/emmett'
 import { PostgreSqlContainer } from '@testcontainers/postgresql'
 import chalk from 'chalk'

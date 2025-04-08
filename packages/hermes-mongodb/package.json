@@ -1,5 +1,5 @@
 {
-  "name": "@arturwojnar/hermes-mongodb",
+  "name": "@chassisjs/hermes-mongodb",
   "version": "1.0.0-alpha.12",
   "description": "Production-Ready TypeScript Outbox Pattern for MongoDB",
   "scripts": {
@@ -32,11 +32,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/arturwojnar/hermes.git",
+    "url": "git+https://github.com/chassisjs/hermes.git",
     "directory": "packages/hermes-mongodb"
   },
   "bugs": {
-    "url": "https://github.com/arturwojnar/hermes/issues"
+    "url": "https://github.com/chassisjs/hermes/issues"
   },
   "homepage": "https://docs.hermesjs.tech",
   "exports": {
@@ -68,7 +68,7 @@
     "ts-essentials": "~10.0.4"
   },
   "peerDependencies": {
-    "@arturwojnar/hermes": "~1.0.0-alpha.8",
+    "@chassisjs/hermes": "~1.0.0-alpha.8",
     "mongodb": ">= 6.8.0 || < 7.0.0"
   }
 }
