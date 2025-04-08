@@ -21,8 +21,8 @@
   },
   "homepage": "https://github.com/chassisjs/hermes#readme",
   "dependencies": {
-    "@chassisjs/hermes": "1.0.0-alpha.9",
-    "@chassisjs/hermes-mongodb": "1.0.0-alpha.11",
+    "@chassisjs/hermes": "1.0.0-alpha.12",
+    "@chassisjs/hermes-mongodb": "1.0.0-alpha.12",
     "chalk": "5.4.1",
     "cors": "2.8.5",
     "express": "4.21.2",
