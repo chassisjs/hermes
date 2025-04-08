@@ -64,7 +64,7 @@
   "devDependencies": {
     "@jest/globals": "~29.7.0",
     "mongodb-memory-server": "~10.1.4",
-    "mongoose": "~8.10.1",
+    "mongoose": "~8.13.2",
     "ts-essentials": "~10.0.4"
   },
   "peerDependencies": {
