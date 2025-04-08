@@ -1,6 +1,6 @@
 {
   "name": "@chassisjs/hermes-postgresql",
-  "version": "1.0.0-alpha.12",
+  "version": "1.0.0-alpha.13",
   "description": "Production-Ready TypeScript Outbox Pattern for PostgreSQL",
   "scripts": {
     "build": "rollup -c",
