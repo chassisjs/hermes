@@ -69,28 +69,3 @@ const defineHermesProjection = <State, Event>() => {
     },
   }
 }
-// type S = {}
-// type A = 'test' | 'dupa'
-// const a = defineHermesProjection<S, A>()
-//   .ofName('ddd')
-//   .ofEvent('dupa')
-//   .ofEvent('test')
-//   .ofEvolve(() => null)
-/*
-  ----------------------------------------
-  ?
-  ----------------------------------------
-  process projections(p,t) ->
-  get projections for the transaction(p,t) ->
-  update all projections
-*/
-
-// type GetImpactedProjections = (
-//   projections: HermesProjection[],
-//   transaction: Transaction<InsertResult>,
-// ) => HermesProjection[]
-// type UpdateProjection = (
-//   tx: postgres.TransactionSql<{}>,
-//   projection: HermesProjection,
-//   transaction: Transaction<InsertResult>,
-// ) => Promise<void>
