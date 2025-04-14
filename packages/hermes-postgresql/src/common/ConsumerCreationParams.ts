@@ -2,6 +2,7 @@ import { Duration } from '@chassisjs/hermes'
 import { JSONValue, Options, PostgresType } from 'postgres'
 import { AsyncOrSync } from 'ts-essentials'
 import { UseAsyncOutboxPolicy } from '../policies/useBasicAsyncStoragePolicy.js'
+import { HermesProjection } from '../projections/index.js'
 import { PublishingQueue } from '../publishingQueue/publishingQueue.js'
 import { HermesMessageEnvelope, NowFunction } from './types.js'
 
@@ -31,6 +32,14 @@ type ConsumerCreationParams<Message extends JSONValue> = {
    * @defaultValue false
    */
   saveTimestamps?: boolean
+
+  /**
+   * List of projections. TODO: Example
+   *
+   * ```typescript
+   * ```
+   */
+  projections?: HermesProjection[]
 
   /**
    * A component responsible for publishing and acknowleding messages.
