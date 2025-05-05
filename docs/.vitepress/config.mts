@@ -12,7 +12,7 @@ export default defineConfig({
       { text: 'Documentation', link: '/pages/what-is-hermes' },
       {
         text: 'Release Notes',
-        link: 'https://github.com/arturwojnar/hermes/releases',
+        link: 'https://github.com/chassisjs/hermes/releases',
       },
     ],
 
@@ -32,7 +32,7 @@ export default defineConfig({
       },
     ],
 
-    socialLinks: [{ icon: 'github', link: 'https://github.com/arturwojnar/hermes' }],
+    socialLinks: [{ icon: 'github', link: 'https://github.com/chassisjs/hermes' }],
     footer: {
       copyright: 'Copyright © Artur Wojnar and contributors.',
     },

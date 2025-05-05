@@ -52,10 +52,10 @@ features:
 
 <div class="badges">
 
-[![Build and test](https://github.com/arturwojnar/hermes/actions/workflows/build-and-test.yaml/badge.svg?branch=main)](https://github.com/arturwojnar/hermes/actions/workflows/build-and-test.yaml)
+[![Build and test](https://github.com/chassisjs/hermes/actions/workflows/build-and-test.yaml/badge.svg?branch=main)](https://github.com/chassisjs/hermes/actions/workflows/build-and-test.yaml)
 
-[![Deploy VitePress site to Pages](https://github.com/arturwojnar/hermes/actions/workflows/publish-docs.yaml/badge.svg)](https://github.com/arturwojnar/hermes/actions/workflows/publish-docs.yaml)
+[![Deploy VitePress site to Pages](https://github.com/chassisjs/hermes/actions/workflows/publish-docs.yaml/badge.svg)](https://github.com/chassisjs/hermes/actions/workflows/publish-docs.yaml)
 
-[![Publish to NPM](https://github.com/arturwojnar/hermes/actions/workflows/publish.yaml/badge.svg)](https://github.com/arturwojnar/hermes/actions/workflows/publish.yaml)
+[![Publish to NPM](https://github.com/chassisjs/hermes/actions/workflows/publish.yaml/badge.svg)](https://github.com/chassisjs/hermes/actions/workflows/publish.yaml)
 
 </div>
