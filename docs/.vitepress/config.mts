@@ -23,9 +23,11 @@ export default defineConfig({
         text: 'PostgreSQL',
         items: [
           { text: 'How does it work?', link: '/pages/postgresql/how-does-it-work.md' },
-          { text: 'Basic usage', link: '/' },
+          { text: 'Limitations', link: '/pages/postgresql/limitations.md' },
+          { text: 'Quick start', link: '/pages/postgresql/quick-start.md' },
+          { text: 'Basic usage', link: '/pages/postgresql/basic-usage.md' },
           { text: 'User registration example', link: '/pages/postgresql/registration-example.md' },
-          { text: 'API docs', link: '/' },
+          { text: 'API docs', link: '/hermes-postgresql/index.html' },
         ],
       },
       {
