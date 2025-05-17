@@ -20,12 +20,32 @@ export default defineConfig({
       { text: 'What is Hermes', link: '/pages/what-is-hermes.md' },
       { text: 'Getting Started', link: '/pages/getting-started.md' },
       {
-        text: 'Examples',
+        text: 'PostgreSQL',
         items: [
-          { text: 'RabbitMQ Examples', link: '/pages/rabbitmq.md' },
-          { text: 'Apache Pulsar Examples', link: '/pages/pulsar.md' },
+          { text: 'How does it work?', link: '/pages/postgresql/how-does-it-work.md' },
+          { text: 'Basic usage', link: '/' },
+          { text: 'User registration example', link: '/pages/postgresql/registration-example.md' },
+          { text: 'API docs', link: '/' },
         ],
       },
+      {
+        text: 'MongoDB',
+        items: [
+          { text: 'How does it work?', link: '/' },
+          { text: 'Basic usage', link: '/' },
+          { text: 'API docs', link: '/' },
+        ],
+      },
+      // {
+      //   text: 'MongoDB',
+      // },
+      // {
+      //   text: 'Examples',
+      //   items: [
+      //     { text: 'RabbitMQ Examples', link: '/pages/rabbitmq.md' },
+      //     { text: 'Apache Pulsar Examples', link: '/pages/pulsar.md' },
+      //   ],
+      // },
       {
         text: 'Others',
         items: [{ text: 'Useful links', link: '/pages/links.md' }],
