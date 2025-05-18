@@ -14,11 +14,11 @@ hero:
       text: Getting started
       link: /pages/getting-started.md
     - theme: alt
-      text: Hermes MongoDB API
+      text: Hermes MongoDB
       link: https://docs.hermesjs.tech/hermes-mongodb/index.html
     - theme: alt
-      text: Hermes PostgreSQL API
-      link: https://docs.hermesjs.tech/hermes-postgresql/index.html
+      text: Hermes PostgreSQL
+      link: /pages/postgresql/how-does-it-work.md
 
 features:
   - title: Optimized for large-scale 🚀
