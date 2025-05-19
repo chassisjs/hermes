@@ -1,9 +1,15 @@
 ## ⚙️ Install
 
+If you work with **PostgreSQL**, then:
+
+```bash
+npm i @chassisjs/hermes @chassisjs/hermes-postgresql
+```
+
 If you work with **MongoDB**, then:
 
 ```bash
-npm i @arturwojnar/hermes @arturwojnar/hermes-mongodb
+npm i @chassisjs/hermes @chassisjs/hermes-mongodb
 ```
 
 ## 💡 The easiest example for MongoDB

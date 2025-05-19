@@ -1,7 +1,7 @@
 {
   // Comments are supported, like tsconfig.json
   "name": "Hermes PostgreSQL",
-  "readme": "index.md",
+  "readme": "README.md",
   "entryPoints": ["src/index.ts"],
   "customCss": "typedoc.css",
   "navigationLinks": {
