@@ -136,10 +136,11 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
             },
           }
           publishingQueue.queue(message)
-          await publishingQueue.run(message)
-          // await sql.begin(async (sql) => {
-          //   await publishingQueue.run(message)
-          // })
+          // await publishingQueue.run(message)
+          await sql.begin(async (sql) => {
+            await publishingQueue.run(message)
+            //TODO: Update projections
+          })
         },
       })
     } catch (e) {
