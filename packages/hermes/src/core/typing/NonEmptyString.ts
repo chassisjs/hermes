@@ -1,5 +1,6 @@
 import { AssertionError } from '../errors.js'
 import { Flavour } from './flavour.js'
+import { assertSomething } from './utils.js'
 
 export type NonEmptyString<T extends string = string, StringType extends string = string> = Flavour<
   StringType,
@@ -7,6 +8,10 @@ export type NonEmptyString<T extends string = string, StringType extends string 
 > & {
   readonly __nonEmptyStringType?: T
 }
+
+type NonEmptyStringTest = NonEmptyString<string, string> extends string ? string : never
+const nonEmptyStringTest: NonEmptyStringTest = 'must be a string'
+assertSomething(nonEmptyStringTest)
 
 export const parseNonEmptyString = <T extends string = string>(
   arg: string | undefined,
