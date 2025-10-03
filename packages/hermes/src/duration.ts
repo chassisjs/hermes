@@ -11,6 +11,16 @@ export class Duration {
     return this._ms
   }
 
+  static from(duration: Duration) {
+    return new Duration(duration.ms)
+  }
+
+  static ofDays(hours: number) {
+    assert(hours >= 0, `hours has to be greater or equal 0`)
+
+    return new Duration(hours * 24 * 60 * 60 * 1000)
+  }
+
   static ofHours(hours: number) {
     assert(hours >= 0, `hours has to be greater or equal 0`)
 
