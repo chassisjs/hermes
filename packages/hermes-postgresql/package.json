@@ -75,5 +75,6 @@
   },
   "peerDependencies": {
     "@chassisjs/hermes": "~1.0.0-alpha.12"
-  }
+  },
+  "gitHead": "8ac7cd97aca58c8f4a326b89218a9e0e750ee968"
 }
