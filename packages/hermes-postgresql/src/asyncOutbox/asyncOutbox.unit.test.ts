@@ -4,6 +4,12 @@ import { setTimeout } from 'node:timers/promises'
 import postgres, { JSONValue } from 'postgres'
 import { AsyncOutboxConsumer, HermesAsyncMessageEnvelope } from './AsyncOutboxConsumer.js'
 
+type Patamter = {
+  type: number
+  value: string | null
+  raw: unknown | null
+}
+
 // Mock the postgres sql template literal function
 const mockJsonValue = {
   type: 1,
@@ -11,7 +17,7 @@ const mockJsonValue = {
   raw: '{}',
 }
 const createMockSql = () => {
-  const sql = jest.fn<(...p: string[]) => postgres.RowList<postgres.Row[]>>()
+  const sql = jest.fn<(...p: (string | string[] | Patamter)[]) => postgres.RowList<postgres.Row[]>>()
 
   Object.assign(sql, {
     end: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
@@ -106,7 +112,7 @@ describe('AsyncOutboxConsumer', () => {
       const consumer = new AsyncOutboxConsumer(defaultParams as any)
 
       consumer.start()
-      expect(() => consumer.start()).toThrowError()
+      expect(() => consumer.start()).toThrow()
       expect(setInterval).toHaveBeenCalledTimes(1)
     })
 
@@ -197,8 +203,8 @@ describe('AsyncOutboxConsumer', () => {
       await setTimeout(Duration.ofSeconds(1).ms)
 
       expect(mockSql).toHaveBeenCalledWith(
-        [expect.stringContaining('UPDATE "asyncOutbox"'), expect.any(String)],
-        pendingMessage.position,
+        [expect.stringContaining('UPDATE "asyncOutbox"'), expect.any(String)] as any,
+        pendingMessage.position as any,
       )
     })
 

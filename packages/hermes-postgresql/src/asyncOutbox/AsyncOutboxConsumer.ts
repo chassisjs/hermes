@@ -194,7 +194,7 @@ const createAsyncOutboxConsumer = <Message extends JSONValue>(params: ConsumerCr
 export {
   AsyncOutboxConsumer,
   createAsyncOutboxConsumer,
-  IAsyncOutboxConsumer,
   type ConsumerCreationParams,
   type HermesAsyncMessageEnvelope,
+  type IAsyncOutboxConsumer,
 }

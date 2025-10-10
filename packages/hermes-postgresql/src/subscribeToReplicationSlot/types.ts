@@ -97,15 +97,15 @@ const parseMessageType = (char: string): MessageType => {
 
 export {
   Bytes,
-  LogicalReplicationState,
   MessageType,
-  OnDataProcessingResult,
   parseMessageType,
   parseTopLevelType,
   TopLevelType,
   type ColumnConfig,
   type ColumnType,
+  type LogicalReplicationState,
   type MessageId,
+  type OnDataProcessingResult,
   type OnInsert,
   type Transaction,
 }

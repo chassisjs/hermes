@@ -49,6 +49,6 @@ export {
   getUpperAndLowerWAL,
   incrementWAL,
   isLsn,
-  Lsn,
   toLsn,
+  type Lsn,
 }
