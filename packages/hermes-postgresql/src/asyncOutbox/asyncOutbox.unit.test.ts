@@ -67,7 +67,7 @@ describe('AsyncOutboxConsumer', () => {
 
       await consumer.send(message)
 
-      expect(mockSql).toHaveBeenCalledWith(
+      expect(mockSql as any).toHaveBeenCalledWith(
         [
           expect.stringContaining('INSERT INTO "asyncOutbox"'),
           expect.any(String),
@@ -202,7 +202,7 @@ describe('AsyncOutboxConsumer', () => {
       // Wait for promises to resolve
       await setTimeout(Duration.ofSeconds(1).ms)
 
-      expect(mockSql).toHaveBeenCalledWith(
+      expect(mockSql as any).toHaveBeenCalledWith(
         [expect.stringContaining('UPDATE "asyncOutbox"'), expect.any(String)] as any,
         pendingMessage.position as any,
       )
