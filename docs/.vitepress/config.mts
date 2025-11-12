@@ -33,29 +33,20 @@ export default defineConfig({
           { text: 'PostgreSQL: Patient Registration', link: '/pages/postgresql-patient-registration.md' },
           { text: 'RabbitMQ Examples', link: '/pages/rabbitmq.md' },
           { text: 'Apache Pulsar Examples', link: '/pages/pulsar.md' },
-          { text: 'Limitations', link: '/pages/limitations.md' },
+          { text: 'Limitations', link: '/pages/postgresql/limitations.md' },
           { text: 'API docs', link: 'https://docs.hermesjs.tech/hermes-postgresql/index.html' },
         ],
       },
       {
         text: 'MongoDB',
         items: [
-          { text: 'How does it work?', link: '/' },
-          { text: 'Basic usage', link: '/' },
+          { text: 'How does it work?', link: '/pages/mongodb/how-does-it-work.md' },
+          { text: 'Basic usage', link: '/pages/mongodb/basic-usage.md' },
           { text: 'MongoDB: Medicine Assignment', link: '/pages/mongodb-medicine-assignment.md' },
+          { text: 'Limitations', link: '/pages/mongodb/limitations.md' },
           { text: 'API docs', link: 'https://docs.hermesjs.tech/hermes-mongodb/index.html' },
         ],
       },
-      // {
-      //   text: 'MongoDB',
-      // },
-      // {
-      //   text: 'Examples',
-      //   items: [
-      //     { text: 'RabbitMQ Examples', link: '/pages/rabbitmq.md' },
-      //     { text: 'Apache Pulsar Examples', link: '/pages/pulsar.md' },
-      //   ],
-      // },
       {
         text: 'Others',
         items: [{ text: 'Useful links', link: '/pages/links.md' }],

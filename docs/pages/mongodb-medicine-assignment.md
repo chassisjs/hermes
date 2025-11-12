@@ -84,24 +84,26 @@ Your Event Handlers
 
 ## MongoDB Change Streams vs PostgreSQL Logical Replication
 
-While similar in concept, there's an important difference:
+While both are reliable, there's an important operational difference:
 
 **MongoDB Change Streams:**
 
 - Based on the **oplog** (operations log)
-- Oplog entries expire after a time period or size limit
-- **You can lose events** if they're not processed before expiration
-- Suitable for most use cases, but requires monitoring
+- Oplog has limited retention (configurable, typically hours to days)
+- Hermes tracks resume tokens to recover from the last processed position
+- **Operational consideration**: Ensure consumers run reliably and oplog is sized appropriately for potential downtime
+- Suitable for most use cases with proper monitoring
 
 **PostgreSQL Logical Replication:**
 
 - Based on the **WAL** (Write-Ahead Log)
-- WAL retained until acknowledged by all consumers
-- **Zero message loss** guarantee
-- Better for critical events that must never be lost
+- WAL retained indefinitely until acknowledged by all replication slots
+- Replication slots track consumer position
+- **Operational consideration**: WAL can grow unbounded if consumers don't acknowledge
+- Better when you need infinite retention regardless of consumer downtime
 
-::: warning Oplog Expiration
-MongoDB's oplog can expire if events aren't processed within the retention window. Monitor your oplog size and ensure Hermes is always running. For critical events that must never be lost, consider PostgreSQL with Logical Replication.
+::: warning Oplog Retention
+MongoDB's oplog has time/size-based retention. If a consumer is down longer than the oplog retention window, it cannot resume from its last position. Ensure proper oplog sizing, consumer high availability, and monitoring. For scenarios requiring unbounded retention during extended consumer downtime, consider PostgreSQL with Logical Replication.
 :::
 
 ## Implementation Walkthrough
@@ -743,28 +745,30 @@ All versions are tested in CI. See the [test suite](https://github.com/arturwojn
 
 ## Comparison: MongoDB vs PostgreSQL
 
-| Feature          | MongoDB (Change Streams)    | PostgreSQL (Logical Replication) |
-| ---------------- | --------------------------- | -------------------------------- |
-| **Message Loss** | Possible (oplog expiration) | Zero (WAL retained)              |
-| **Performance**  | Excellent                   | Excellent                        |
-| **Overhead**     | No polling                  | No polling                       |
-| **Complexity**   | Simple                      | Moderate                         |
-| **Scalability**  | Partition keys              | Partition keys                   |
-| **Best For**     | Non-critical events         | Critical events                  |
+| Feature               | MongoDB (Change Streams)                    | PostgreSQL (Logical Replication)            |
+| --------------------- | ------------------------------------------- | ------------------------------------------- |
+| **Reliability**       | Reliable with proper oplog sizing           | Reliable with proper WAL management         |
+| **Retention**         | Time/size-based oplog window                | Indefinite WAL retention until acknowledged |
+| **Operational Focus** | Monitor oplog size and consumer uptime      | Monitor WAL growth and replication slot lag |
+| **Performance**       | Excellent                                   | Excellent                                   |
+| **Overhead**          | No polling                                  | No polling                                  |
+| **Complexity**        | Simple                                      | Moderate                                    |
+| **Scalability**       | Partition keys                              | Partition keys                              |
+| **Best For**          | High-availability consumers with monitoring | Consumers with potential extended downtime  |
 
 **When to use MongoDB:**
 
 - You already use MongoDB
-- Events are not mission-critical
-- You can tolerate rare message loss
+- You can ensure high consumer availability
+- You can properly size and monitor oplog retention
 - You want simpler setup
 
 **When to use PostgreSQL:**
 
-- Zero message loss is required
-- Events are mission-critical (e.g., financial transactions)
-- You need guaranteed delivery
-- You can invest in monitoring WAL retention
+- You need unbounded message retention
+- Consumers might be offline for extended periods
+- You prefer WAL-based retention guarantees
+- You're already using PostgreSQL
 
 ## Related Resources
 
