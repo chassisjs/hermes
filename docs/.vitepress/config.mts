@@ -28,9 +28,13 @@ export default defineConfig({
       {
         text: 'PostgreSQL',
         items: [
+          { text: 'How does it work?', link: '/pages/postgresql/how-does-it-work.md' },
+          { text: 'Quick start', link: '/pages/postgresql/quick-start.md' },
           { text: 'PostgreSQL: Patient Registration', link: '/pages/postgresql-patient-registration.md' },
           { text: 'RabbitMQ Examples', link: '/pages/rabbitmq.md' },
           { text: 'Apache Pulsar Examples', link: '/pages/pulsar.md' },
+          { text: 'Limitations', link: '/pages/limitations.md' },
+          { text: 'API docs', link: 'https://docs.hermesjs.tech/hermes-postgresql/index.html' },
         ],
       },
       {
@@ -39,7 +43,7 @@ export default defineConfig({
           { text: 'How does it work?', link: '/' },
           { text: 'Basic usage', link: '/' },
           { text: 'MongoDB: Medicine Assignment', link: '/pages/mongodb-medicine-assignment.md' },
-          { text: 'API docs', link: '/' },
+          { text: 'API docs', link: 'https://docs.hermesjs.tech/hermes-mongodb/index.html' },
         ],
       },
       // {

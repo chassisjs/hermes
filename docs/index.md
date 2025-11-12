@@ -18,7 +18,7 @@ hero:
       link: https://docs.hermesjs.tech/hermes-mongodb/index.html
     - theme: alt
       text: Hermes PostgreSQL
-      link: /pages/postgresql/how-does-it-work.md
+      link: https://docs.hermesjs.tech/hermes-postgresql/index.html
 
 features:
   - title: Optimized for large-scale 🚀
