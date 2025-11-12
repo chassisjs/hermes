@@ -12,7 +12,8 @@
     "prepare": "husky",
     "test": "node --experimental-vm-modules ../../node_modules/.bin/jest --colors --coverage --verbose --maxConcurrency=5",
     "typecheck": "tsc --noEmit",
-    "typedoc": "typedoc"
+    "typedoc": "typedoc --favicon public/favicon.ico",
+    "typedoc:watch": "typedoc --favicon public/favicon.ico --watch"
   },
   "keywords": [
     "outbox",
@@ -71,5 +72,8 @@
     "@chassisjs/hermes": "~1.0.0-alpha.12",
     "mongodb": ">= 6.8.0 || < 7.0.0"
   },
-  "gitHead": "8ac7cd97aca58c8f4a326b89218a9e0e750ee968"
+  "gitHead": "8ac7cd97aca58c8f4a326b89218a9e0e750ee968",
+  "dependencies": {
+    "whatwg-url": "^15.1.0"
+  }
 }

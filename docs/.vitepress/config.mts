@@ -24,15 +24,14 @@ export default defineConfig({
     sidebar: [
       { text: 'What is Hermes', link: '/pages/what-is-hermes.md' },
       { text: 'Getting Started', link: '/pages/getting-started.md' },
+      { text: 'Every* system is distributed (essey)', link: 'https://www.knowhowcode.dev/articles/outbox/' },
       {
         text: 'PostgreSQL',
         items: [
-          { text: 'How does it work?', link: '/pages/postgresql/how-does-it-work.md' },
-          { text: 'Limitations', link: '/pages/postgresql/limitations.md' },
-          { text: 'Quick start', link: '/pages/postgresql/quick-start.md' },
-          { text: 'Basic usage', link: '/pages/postgresql/basic-usage.md' },
-          { text: 'User registration example', link: '/pages/postgresql/registration-example.md' },
-          { text: 'API docs', link: '/hermes-postgresql/index.html', target: '_blank' },
+          { text: 'PostgreSQL: Patient Registration', link: '/pages/postgresql-patient-registration.md' },
+          { text: 'MongoDB: Medicine Assignment', link: '/pages/mongodb-medicine-assignment.md' },
+          { text: 'RabbitMQ Examples', link: '/pages/rabbitmq.md' },
+          { text: 'Apache Pulsar Examples', link: '/pages/pulsar.md' },
         ],
       },
       {
