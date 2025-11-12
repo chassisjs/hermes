@@ -29,7 +29,6 @@ export default defineConfig({
         text: 'PostgreSQL',
         items: [
           { text: 'PostgreSQL: Patient Registration', link: '/pages/postgresql-patient-registration.md' },
-          { text: 'MongoDB: Medicine Assignment', link: '/pages/mongodb-medicine-assignment.md' },
           { text: 'RabbitMQ Examples', link: '/pages/rabbitmq.md' },
           { text: 'Apache Pulsar Examples', link: '/pages/pulsar.md' },
         ],
@@ -39,6 +38,7 @@ export default defineConfig({
         items: [
           { text: 'How does it work?', link: '/' },
           { text: 'Basic usage', link: '/' },
+          { text: 'MongoDB: Medicine Assignment', link: '/pages/mongodb-medicine-assignment.md' },
           { text: 'API docs', link: '/' },
         ],
       },
