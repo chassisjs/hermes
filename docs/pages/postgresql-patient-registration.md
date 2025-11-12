@@ -55,7 +55,7 @@ Hermes PostgreSQL solves this by leveraging **PostgreSQL's Write-Ahead Log (WAL)
 4. **At-least-once delivery** ensures messages eventually reach handlers
 5. **Idempotent handlers** safely handle duplicate messages
 
-![Outbox Pattern Concept](../public/outbox-concept.png)
+![Outbox Pattern Concept](../public/postgresql/outbox-concept.png)
 
 ### Key Benefits
 
