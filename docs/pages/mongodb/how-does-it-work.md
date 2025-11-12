@@ -25,9 +25,7 @@ Simple! 😌
 
 Shortly, Change Streams provide a way to listen to real-time data changes in MongoDB. They are built on top of the **oplog** (operations log), which is similar to PostgreSQL's Write-Ahead Log (WAL).
 
-See how MongoDB Change Streams work on this diagram 👇
-
-![Change Streams Overview](../../public/mongodb/change-streams.png)
+**How MongoDB Change Streams work:**
 
 ➡️ Change Streams allow applications to access real-time data changes without the complexity and risk of tailing the oplog
 
@@ -73,9 +71,7 @@ While both implement the Outbox pattern reliably, there are important infrastruc
 
 ## Internal implementation
 
-Look at the diagram below to track down how things work internally in Hermes MongoDB 👇
-
-![Internal Schema](../../public/mongodb/schema.png)
+**How things work internally in Hermes MongoDB:**
 
 ➡️ The app sends messages (events, commands) to Hermes MongoDB
 
