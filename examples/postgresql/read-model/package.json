@@ -21,8 +21,8 @@
   },
   "homepage": "https://github.com/chassisjs/hermes#readme",
   "dependencies": {
-    "@chassisjs/hermes": "1.0.0-alpha.12",
-    "@chassisjs/hermes-postgresql": "1.0.0-alpha.12",
+    "@chassisjs/hermes": "1.0.0-alpha.15",
+    "@chassisjs/hermes-postgresql": "1.0.0-alpha.15",
     "chalk": "5.4.1",
     "cors": "2.8.5",
     "express": "4.21.2",

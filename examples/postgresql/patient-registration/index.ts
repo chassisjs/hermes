@@ -14,7 +14,15 @@ import {
   createOutboxConsumer,
   useBasicAsyncOutboxConsumerPolicy,
 } from '@chassisjs/hermes-postgresql'
-import { Command, DefaultCommandMetadata, DefaultRecord, Event, getInMemoryMessageBus } from '@event-driven-io/emmett'
+import {
+  Command,
+  DefaultCommandMetadata,
+  DefaultRecord,
+  Event,
+  command,
+  event,
+  getInMemoryMessageBus,
+} from '@event-driven-io/emmett'
 import { PostgreSqlContainer } from '@testcontainers/postgresql'
 import chalk from 'chalk'
 import cors from 'cors'
@@ -49,12 +57,16 @@ type CommonMetadata = DefaultCommandMetadata & {
   redeliveryCount: number
   messageId: string
 }
-type DomainCommand<CommandType extends string = string, CommandData extends DefaultRecord = DefaultRecord> = {
-  kind: 'command'
-} & Command<CommandType, CommandData, CommonMetadata | undefined>
-type DomainEvent<EventType extends string = string, EventData extends DefaultRecord = DefaultRecord> = {
-  kind: 'event'
-} & Event<EventType, EventData, CommonMetadata | undefined>
+type DomainCommand<CommandType extends string = string, CommandData extends DefaultRecord = DefaultRecord> = Command<
+  CommandType,
+  CommandData,
+  CommonMetadata | undefined
+>
+type DomainEvent<EventType extends string = string, EventData extends DefaultRecord = DefaultRecord> = Event<
+  EventType,
+  EventData,
+  CommonMetadata | undefined
+>
 type _AddUserToIdp = DomainCommand<
   '_AddUserToIdp',
   {
@@ -182,16 +194,11 @@ const publishOne = async (
   }
   console.info(`publish ${message.type}`)
 
-  if (message.kind === 'command') {
-    await messageBus.send({
-      ...message,
-      metadata,
-    })
+  // Check if it's a command by checking the type name (commands start with underscore in this app)
+  if (message.type.startsWith('_')) {
+    await messageBus.send(command(message.type, message.data, metadata))
   } else {
-    await messageBus.publish({
-      ...message,
-      metadata,
-    })
+    await messageBus.publish(event(message.type, message.data, metadata))
   }
 }
 const outbox = createOutboxConsumer<RegisterPatientCommand | RegisterPatientEvent>({
@@ -228,7 +235,6 @@ const revertRegistration = async (params: _RevertPatientRegistration['data'], em
   const messageIdParam = 'sub' in params ? params.sub.toString() : params.systemId.toString()
   const revertCommand = literalObject<MessageEnvelope<_RevertPatientRegistration>>({
     message: {
-      kind: 'command',
       type: '_RevertPatientRegistration',
       data: params,
     },
@@ -239,7 +245,6 @@ const revertRegistration = async (params: _RevertPatientRegistration['data'], em
     messageId: constructMessageId('PatientRegistrationFailedPatientRegistrationFailed', messageIdParam),
     messageType: 'PatientRegistrationFailed',
     message: {
-      kind: 'event',
       type: 'PatientRegisteredSuccessfully',
       data: {
         email,
@@ -253,7 +258,6 @@ const revertRegistration = async (params: _RevertPatientRegistration['data'], em
 const sendStoreCommand = async (sub: Subject, systemId: PatientId, email: Email) => {
   const storePatientCommand = literalObject<MessageEnvelope<_StorePatient>>({
     message: {
-      kind: 'command',
       type: '_StorePatient',
       data: { systemId, sub, email },
     },
@@ -263,44 +267,44 @@ const sendStoreCommand = async (sub: Subject, systemId: PatientId, email: Email)
   await outbox.queue(storePatientCommand)
 }
 
-messageBus.handle<_RevertPatientRegistration>(async ({ data, metadata }) => {
+messageBus.handle<_RevertPatientRegistration>(async (message: _RevertPatientRegistration) => {
   try {
-    if ('systemId' in data) {
-      await removePatient(data.systemId)
+    if ('systemId' in message.data) {
+      await removePatient(message.data.systemId)
     }
 
-    if ('sub' in data) {
-      await removeUserFromIdentityProvider(data.sub)
+    if ('sub' in message.data) {
+      await removeUserFromIdentityProvider(message.data.sub)
     }
   } catch (error) {
-    if (metadata && 'redeliveryCount' in metadata && metadata.redeliveryCount < 5) {
+    if (message.metadata && 'redeliveryCount' in message.metadata && message.metadata.redeliveryCount < 5) {
       throw error
     }
   }
 }, '_RevertPatientRegistration')
 
-messageBus.handle<_AddUserToIdp>(async ({ data, metadata }) => {
+messageBus.handle<_AddUserToIdp>(async (message: _AddUserToIdp) => {
   let sub: Subject | undefined
 
   try {
     console.info(`_AddUserToIdp`)
-    sub = await addUserToIdentityProvider(data.email)
+    sub = await addUserToIdentityProvider(message.data.email)
     // This is the place where something bad can happen.
     // Imagine that the previous I/O operation is completed, and the next one will never be.
-    // If so, the handler will be called again. That's why this is called “at-least-once delivery”.
-    await sendStoreCommand(sub, data.systemId, data.email)
+    // If so, the handler will be called again. That's why this is called "at-least-once delivery".
+    await sendStoreCommand(sub, message.data.systemId, message.data.email)
   } catch (error) {
     // Handling the case when _AddUserToIdp is called another time.
     // Before the change happened (addUserToIdentityProvider) without publishing a command (sendStoreCommand).
     if ((error as Error)?.name === `UserAlreadyExistsError`) {
-      await sendStoreCommand(await getIdPUser(data.email), data.systemId, data.email)
+      await sendStoreCommand(await getIdPUser(message.data.email), message.data.systemId, message.data.email)
     } else {
-      // In this place we can check the `redeliveryCount` of `metadata`.
+      // In this place we can check the `redeliveryCount` of `message.metadata`.
       console.error(error)
 
       // Fail on the `sendStoreCommand`.
       if (sub) {
-        await revertRegistration({ sub }, data.email)
+        await revertRegistration({ sub }, message.data.email)
       }
       // If an error if thrown, then this handler fails
       // and the related outbox message won't be acknowledged
@@ -309,19 +313,18 @@ messageBus.handle<_AddUserToIdp>(async ({ data, metadata }) => {
   }
 }, '_AddUserToIdp')
 
-messageBus.handle<_StorePatient>(async ({ data }) => {
+messageBus.handle<_StorePatient>(async (message: _StorePatient) => {
   try {
     console.info(`_StorePatient`)
 
     await sql.begin(async (sql) => {
-      await storePatient(data.systemId, data.sub, sql)
+      await storePatient(message.data.systemId, message.data.sub, sql)
       const patientRegisterdEvent = literalObject<MessageEnvelope<PatientRegisteredSuccessfully>>({
         message: {
-          kind: 'event',
           type: 'PatientRegisteredSuccessfully',
-          data: { patientId: data.systemId, patientSub: data.sub },
+          data: { patientId: message.data.systemId, patientSub: message.data.sub },
         },
-        messageId: constructMessageId('PatientRegisteredSuccessfully', data.sub),
+        messageId: constructMessageId('PatientRegisteredSuccessfully', message.data.sub),
         messageType: 'PatientRegisteredSuccessfully',
       })
       await outbox.queue(patientRegisterdEvent, { tx: sql })
@@ -334,7 +337,7 @@ messageBus.handle<_StorePatient>(async ({ data }) => {
 
     console.error(error)
 
-    await revertRegistration({ sub: data.sub, systemId: data.systemId }, data.email)
+    await revertRegistration({ sub: message.data.sub, systemId: message.data.systemId }, message.data.email)
   }
 }, '_StorePatient')
 
@@ -342,7 +345,6 @@ const registerPatient = async (params: RegisterPatientRequest) => {
   const patientId = parsePatientId(crypto.randomUUID())
   const addUserToIdPCommand = literalObject<MessageEnvelope<_AddUserToIdp>>({
     message: {
-      kind: 'command',
       type: '_AddUserToIdp',
       data: { email: parseEmail(params.email), systemId: patientId },
     },
