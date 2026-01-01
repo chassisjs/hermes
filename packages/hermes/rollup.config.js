@@ -33,7 +33,9 @@ const options = [
           moduleResolution: 'NodeNext',
         },
       }),
-      resolve(),
+      resolve({
+        exportConditions: ['node', 'import', 'require', 'default'],
+      }),
       commonjs(),
     ],
     onwarn(warning, warn) {
