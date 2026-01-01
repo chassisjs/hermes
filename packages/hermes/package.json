@@ -1,6 +1,6 @@
 {
   "name": "@chassisjs/hermes",
-  "version": "1.0.0-alpha.14",
+  "version": "1.0.0-alpha.15",
   "description": "Production-Ready TypeScript Outbox Pattern",
   "type": "module",
   "scripts": {
