@@ -25,7 +25,9 @@ const options = [
       json(),
       typescript({
         tsconfig: './tsconfig.build.json',
-        outputToFilesystem: false,
+        outputToFilesystem: true,
+        declaration: true,
+        declarationDir: './lib',
         noEmitOnError: true, // Fail build on TS errors
         sourceMap: true,
         compilerOptions: {
@@ -33,7 +35,9 @@ const options = [
           moduleResolution: 'NodeNext',
         },
       }),
-      resolve(),
+      resolve({
+        exportConditions: ['node', 'import', 'require', 'default'],
+      }),
       commonjs(),
     ],
     external: ['@chassisjs/hermes', 'mongodb'],

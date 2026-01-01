@@ -1,7 +1,7 @@
 /* -eslint-disable  @typescript-eslint/no-unused-vars  */
 
 import { Duration, noop, swallow } from '@chassisjs/hermes'
-import { pipe } from 'fp-ts/lib/function.js'
+import { pipe } from 'fp-ts/function'
 import { setTimeout } from 'node:timers/promises'
 import postgres from 'postgres'
 import { convertBigIntToLsn, incrementWAL } from '../common/lsn.js'

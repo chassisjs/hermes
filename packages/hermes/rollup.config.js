@@ -25,7 +25,9 @@ const options = [
       json(),
       typescript({
         tsconfig: './tsconfig.build.json',
-        outputToFilesystem: false,
+        outputToFilesystem: true,
+        declaration: true,
+        declarationDir: './lib',
         noEmitOnError: true, // Fail build on TS errors
         sourceMap: true,
         compilerOptions: {
