@@ -584,17 +584,17 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
     if (Array.isArray(message)) {
       if ('savepoint' in sql) {
         for (const m of message) {
-          await this._publishOne(sql, m, partitionKey)
+          await this._publishOne(sql as any, m, partitionKey)
         }
       } else {
         await sql.begin(async (sql) => {
           for (const m of message) {
-            await this._publishOne(sql, m, partitionKey)
+            await this._publishOne(sql as any, m, partitionKey)
           }
         })
       }
     } else {
-      await this._publishOne(sql, message, partitionKey)
+      await this._publishOne(sql as any, message, partitionKey)
     }
   }
 

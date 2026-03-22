@@ -237,17 +237,17 @@ class AsyncOutboxConsumer<Message extends JSONValue> implements IAsyncOutboxCons
     if (Array.isArray(message)) {
       if ('savepoint' in sql) {
         for (const m of message) {
-          await this._publishOne(sql, m)
+          await this._publishOne(sql as any, m)
         }
       } else {
         await sql.begin(async (sql) => {
           for (const m of message) {
-            await this._publishOne(sql, m)
+            await this._publishOne(sql as any, m)
           }
         })
       }
     } else {
-      await this._publishOne(sql, message)
+      await this._publishOne(sql as any, message)
     }
   }
 

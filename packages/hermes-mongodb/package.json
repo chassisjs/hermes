@@ -63,9 +63,9 @@
   },
   "license": "ISC",
   "devDependencies": {
-    "@jest/globals": "~30.2.0",
+    "@jest/globals": "~30.3.0",
     "mongodb-memory-server": "~11.0.1",
-    "mongoose": "~9.1.1",
+    "mongoose": "~9.3.1",
     "ts-essentials": "~10.1.1"
   },
   "peerDependencies": {
@@ -74,6 +74,6 @@
   },
   "gitHead": "8ac7cd97aca58c8f4a326b89218a9e0e750ee968",
   "dependencies": {
-    "whatwg-url": "^15.1.0"
+    "whatwg-url": "^16.0.1"
   }
 }
