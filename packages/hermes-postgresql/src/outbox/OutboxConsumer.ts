@@ -92,8 +92,8 @@ import { OutboxConsumerState, OutboxConsumerStore } from './OutboxConsumerState.
 export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsumer<Message> {
   private _sql: HermesSql | null = null
   private _sendAsync:
-    | ((message: MessageEnvelope<Message> | MessageEnvelope<Message>[], tx?: TransactionSql) => Promise<void>)
-    | null = null
+    ((message: MessageEnvelope<Message> | MessageEnvelope<Message>[], tx?: TransactionSql) => Promise<void>) | null =
+    null
 
   /**
    * @internal

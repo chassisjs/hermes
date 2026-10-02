@@ -39,7 +39,7 @@ features:
 
 <div class="usedBy">
   <span class="trustedBy">Trusted by</span>
-  
+
   <div class="clients">
     <a href="https://www.orikami.ai/" target="_blank" class="client" title="Orikami">
       <img src="./public/logo_orikami.svg" alt="Orikami Logo" class="orikami" />

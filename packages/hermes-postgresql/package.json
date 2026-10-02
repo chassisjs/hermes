@@ -64,15 +64,15 @@
     }
   },
   "devDependencies": {
-    "@jest/globals": "~30.3.0",
+    "@jest/globals": "~30.5.2",
     "@testcontainers/postgresql": "~11.13.0",
     "testcontainers": "~11.13.0",
-    "ts-essentials": "~10.1.1"
+    "ts-essentials": "~10.2.1"
   },
   "dependencies": {
     "fp-ts": "~2.16.11",
     "nodemon": "~3.1.14",
-    "postgres": "~3.4.8"
+    "postgres": "~3.4.9"
   },
   "peerDependencies": {
     "@chassisjs/hermes": "~1.0.0-alpha.15"
