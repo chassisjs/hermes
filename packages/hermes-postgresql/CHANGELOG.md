@@ -1,5 +1,34 @@
 # Change Log
 
+# [1.0.0-alpha.18](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.17...v1.0.0-alpha.18) (2026-11-01)
+
+A reliability release. It fixes how messages are acknowledged and how the consumer stops. No API changes.
+
+## Bug fixes
+
+- **No more message loss when acknowledging during the next transaction.** The replication stream used to read the transaction being received at the time of the acknowledgment. When a publish finished while the next transaction was still streaming in, the slot position jumped past an unpublished transaction and part of its inserts was dropped. Each acknowledgment now confirms the transaction it belongs to, and the standby status update is actually sent to PostgreSQL.
+- **`stop()` stops the publishing queue.** Previously, retries kept running after `stop()`, failed on the cleared state and ended in unhandled promise rejections (which crash Node by default). `stop()` now stops new publishing, waits up to 5 seconds for the publish in progress to finish and be acknowledged, and only then closes the connections.
+- **A failed acknowledgment no longer republishes the message.** If `publish` succeeded but the acknowledgment (e.g. saving the position) failed, the message was sent again and counted as a failed delivery. Now only the acknowledgment is retried, after `waitAfterFailedPublish`.
+- **Non-blocking queue (`serialization: false`):**
+  - Messages are acknowledged strictly in order by a single loop. A failed acknowledgment of a younger message no longer reports the wrong LSN and no longer leaves the queue stuck.
+  - A message that is still being published is no longer resent by the retry timer.
+  - A failing `onFailedPublish` no longer makes `run` reject.
+- **Serialized queue (`serialization: true`):**
+  - A failed acknowledgment of the last message in the queue no longer throws a `TypeError` and loses the message.
+  - A failing `onFailedPublish` no longer stops the publishing loop.
+  - `waitUntilIsEmpty()` no longer resolves while messages are still in the queue.
+- **Replication stream:** status updates are skipped once the stream is closed, and a `CONNECTION_CLOSED` error without a query no longer throws inside the error handler.
+- Debug `console.log` calls were removed.
+
+## Behavior change
+
+- **`waitAfterFailedPublish: Duration.ofSeconds(0)` no longer disables retries** for the non-blocking queue. A failed message was then never retried, its acknowledgment blocked all younger messages and the replication slot kept growing. `0` now means "retry without waiting", the same as in the serialized queue.
+
+## Known limitations
+
+- Retries are still unlimited. Use `redeliveryCount` in the message envelope to move a poison message aside in your `publish` callback.
+- There is no backpressure yet: when publishing is slower than the incoming changes, pending messages accumulate in memory.
+
 # [1.0.0-alpha.8](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.9...v1.0.0-alpha.10) (2025-03-08)
 
 Greetings! 😍 🎉
