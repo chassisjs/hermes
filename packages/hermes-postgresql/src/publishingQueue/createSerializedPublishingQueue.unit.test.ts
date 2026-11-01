@@ -250,7 +250,7 @@ describe('publishingQueue', () => {
     expect(acknowledged).toEqual(['0/1', '0/2', '0/3'])
   })
 
-  it('should republish the last message when its acknowledgment fails', async () => {
+  it('should retry only the acknowledgment when it fails', async () => {
     const mockPublish = createMockPublish()
     const mockFailedPublishCallback = jest.fn(async (_tx: Transaction<InsertResult>): Promise<void> => {})
     const { queue, run, size } = createSerializedPublishingQueue(mockPublish, {
@@ -264,9 +264,8 @@ describe('publishingQueue', () => {
     queue(message)
     await run()
 
-    expect(mockPublish).toHaveBeenCalledTimes(2)
-    expect(mockFailedPublishCallback).toHaveBeenCalledTimes(1)
-    expect(mockFailedPublishCallback).toHaveBeenCalledWith(message.transaction)
+    expect(mockPublish).toHaveBeenCalledTimes(1)
+    expect(mockFailedPublishCallback).not.toHaveBeenCalled()
     expect(message.acknowledge).toHaveBeenCalledTimes(2)
     expect(size()).toBe(0)
   })
@@ -288,7 +287,7 @@ describe('publishingQueue', () => {
     messages.forEach((message) => queue(message))
     await run()
 
-    expect(publishedMessages).toEqual(['0/1', '0/2', '0/2', '0/3'])
+    expect(publishedMessages).toEqual(['0/1', '0/2', '0/3'])
     expect(messages[0].acknowledge).toHaveBeenCalledTimes(1)
     expect(messages[1].acknowledge).toHaveBeenCalledTimes(2)
     expect(messages[2].acknowledge).toHaveBeenCalledTimes(1)
@@ -327,7 +326,7 @@ describe('publishingQueue', () => {
     const running = run()
 
     await setTimeout(120)
-    dispose()
+    await dispose()
     await running
 
     const calls = mockPublish.mock.calls.length
@@ -336,6 +335,45 @@ describe('publishingQueue', () => {
 
     expect(calls).toBeGreaterThan(0)
     expect(mockPublish).toHaveBeenCalledTimes(calls)
+  })
+
+  it('should let the publish in progress finish, including its acknowledgment, on `dispose`', async () => {
+    const mockPublish = jest
+      .fn<(messageToPublish: MessageToPublish<InsertResult>) => Promise<void>>()
+      .mockImplementation(() => setTimeout(100))
+    const { queue, run, dispose, size } = createSerializedPublishingQueue(mockPublish)
+    const message1 = createMockMessage('0/1')
+    const message2 = createMockMessage('0/2')
+
+    queue(message1)
+    queue(message2)
+    void run()
+
+    await setTimeout(20)
+    await dispose()
+
+    expect(mockPublish).toHaveBeenCalledTimes(1)
+    expect(message1.acknowledge).toHaveBeenCalledTimes(1)
+    expect(message2.acknowledge).not.toHaveBeenCalled()
+    expect(size()).toBe(1)
+  })
+
+  it('should not report an empty queue after `dispose` when messages are left', async () => {
+    const mockPublish = jest
+      .fn<(messageToPublish: MessageToPublish<InsertResult>) => Promise<void>>()
+      .mockRejectedValue(new Error('Publish failed'))
+    const { queue, run, dispose, waitUntilIsEmpty } = createSerializedPublishingQueue(mockPublish, {
+      waitAfterFailedPublish: Duration.ofMiliseconds(10),
+    })
+
+    queue(createMockMessage('0/1'))
+    void run()
+    await setTimeout(20)
+    await dispose()
+
+    const result = await Promise.race([waitUntilIsEmpty().then(() => 'empty'), setTimeout(50, 'pending')])
+
+    expect(result).toBe('pending')
   })
 
   it('should resolve `waitUntilIsEmpty` once the queue is drained', async () => {

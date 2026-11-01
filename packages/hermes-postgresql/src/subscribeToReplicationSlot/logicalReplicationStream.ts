@@ -82,7 +82,7 @@ const startLogicalReplication = async <InsertResult>(params: LogicalReplicationP
 
     if (
       (pError.code === PSQL_ADMIN_SHUTDOWN || pError.code === 'CONNECTION_CLOSED') &&
-      pError.query.includes('START_REPLICATION SLOT')
+      pError.query?.includes('START_REPLICATION SLOT')
     ) {
       console.info('Replication connection closed due to database shutdown')
       await swallow(() => sql.end({ timeout: Duration.ofSeconds(1).ms }))

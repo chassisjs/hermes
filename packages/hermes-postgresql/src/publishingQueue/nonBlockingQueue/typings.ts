@@ -6,6 +6,7 @@ type StateMessage<InsertResult> = MessageToPublish<InsertResult> & { delivered: 
 type ResendingStrategyParamse<InsertResult> = {
   getMessages: () => StateMessage<InsertResult>[]
   publishMessage: (message: MessageToPublish<InsertResult>) => Promise<unknown>
+  acknowledgeDelivered: () => Promise<unknown>
   isPublishing: () => boolean
   interval: Duration
 }

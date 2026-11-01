@@ -9,7 +9,7 @@ type PublishingQueueOptions<InsertResult> = {
   onFailedPublish?: (tx: Transaction<InsertResult>) => Promise<void>
 }
 
-type PublishResult = 'published' | 'failed' | 'exhausted'
+type PublishResult = 'published' | 'failed' | 'unacknowledged' | 'exhausted'
 
 const createSerializedPublishingQueue = <InsertResult>(
   publish: (messageToPublish: MessageToPublish<InsertResult>) => Promise<void>,
@@ -23,6 +23,8 @@ const createSerializedPublishingQueue = <InsertResult>(
   const disposal = new AbortController()
   let isPublishing = false
   let publishingPromise = CancellationPromise.resolved()
+  let running = Promise.resolve()
+  let deliveredLsn: Lsn | undefined
 
   const queue = (messageToPublish: MessageToPublish<InsertResult>) => {
     if (ids.has(messageToPublish.transaction.lsn)) {
@@ -44,6 +46,12 @@ const createSerializedPublishingQueue = <InsertResult>(
     ids.delete(oldest.transaction.lsn)
   }
 
+  const _waitAfterFailure = async () => {
+    if (waitAfterFailedPublish) {
+      await setTimeout(waitAfterFailedPublish.ms, undefined, { signal: disposal.signal }).catch(noop)
+    }
+  }
+
   const run = async () => {
     if (isPublishing || disposal.signal.aborted) {
       return
@@ -51,7 +59,12 @@ const createSerializedPublishingQueue = <InsertResult>(
 
     isPublishing = true
     publishingPromise = new CancellationPromise()
+    running = _publishUntilExhausted()
 
+    await running
+  }
+
+  const _publishUntilExhausted = async () => {
     try {
       do {
         const result = await _publishOldestMessage()
@@ -61,11 +74,10 @@ const createSerializedPublishingQueue = <InsertResult>(
             continue
           case 'failed':
             await onFailedPublish(messages[0].transaction).catch((error) => console.error(error, 'onFailedPublish'))
-
-            if (waitAfterFailedPublish) {
-              await setTimeout(waitAfterFailedPublish.ms, undefined, { signal: disposal.signal }).catch(noop)
-            }
-
+            await _waitAfterFailure()
+            break
+          case 'unacknowledged':
+            await _waitAfterFailure()
             break
           case 'exhausted':
             isPublishing = false
@@ -77,7 +89,10 @@ const createSerializedPublishingQueue = <InsertResult>(
       } while (isPublishing && !disposal.signal.aborted)
     } finally {
       isPublishing = false
-      publishingPromise.resolve()
+
+      if (messages.length === 0) {
+        publishingPromise.resolve()
+      }
     }
   }
 
@@ -88,15 +103,26 @@ const createSerializedPublishingQueue = <InsertResult>(
 
     const oldest = messages[0]
 
-    try {
-      await publish(oldest)
-      await oldest.acknowledge()
-      dequeueOldest()
+    if (deliveredLsn !== oldest.transaction.lsn) {
+      try {
+        await publish(oldest)
+      } catch {
+        return 'failed'
+      }
 
-      return 'published'
-    } catch {
-      return 'failed'
+      deliveredLsn = oldest.transaction.lsn
     }
+
+    try {
+      await oldest.acknowledge()
+    } catch (error) {
+      console.error(error, 'acknowledge')
+      return 'unacknowledged'
+    }
+
+    dequeueOldest()
+
+    return 'published'
   }
 
   return {
@@ -105,7 +131,10 @@ const createSerializedPublishingQueue = <InsertResult>(
     run,
     size: () => messages.length,
     waitUntilIsEmpty: () => publishingPromise,
-    dispose: () => disposal.abort(),
+    dispose: async () => {
+      disposal.abort()
+      await running
+    },
   }
 }
 

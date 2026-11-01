@@ -1,5 +1,4 @@
 import { CancellationPromise, Duration } from '@chassisjs/hermes'
-import { createAsyncOpsQueue } from '../../common/createAsyncOpsQueue.js'
 import { Lsn } from '../../common/lsn.js'
 import { MessageToPublish, PublishingQueue, PublishingQueueOptions } from '../publishingQueue.js'
 import { createIntervalResendingStrategy } from './intervalResendingStrategy.js'
@@ -11,18 +10,12 @@ const createNonBlockingPublishingQueue = <InsertResult>(
 ): PublishingQueue<'NonBlockingPublishingQueue', InsertResult> => {
   const onFailedPublish = options?.onFailedPublish || (() => Promise.resolve())
   const ids = new Set<Lsn>()
-  const acknowledgmentQueue = createAsyncOpsQueue()
   // FIFO
   const messages = new Array<StateMessage<InsertResult>>()
+  const inProgress = new Set<Promise<void>>()
   let publishingPromise = CancellationPromise.resolved()
-
-  const getNextMessageThatShouldBeDelivered = () => {
-    return messages.find((message) => !message.delivered)
-  }
-
-  const getNextTransactionLsnThatShouldBeDelivered = () => {
-    return getNextMessageThatShouldBeDelivered()?.transaction?.lsn
-  }
+  let isAcknowledging = false
+  let isDisposed = false
 
   const getState = (lsn: Lsn) => {
     return messages.find(({ transaction }) => transaction.lsn === lsn)
@@ -51,14 +44,22 @@ const createNonBlockingPublishingQueue = <InsertResult>(
     // after a failed previous attempt.
     messageToPublish = messageToPublish || messages[0]
 
-    await _publishMessage(messageToPublish)
+    if (messageToPublish) {
+      await _track(_publishMessage(messageToPublish))
+    }
+  }
+
+  const _track = async (operation: Promise<void>) => {
+    inProgress.add(operation)
+
+    try {
+      await operation
+    } finally {
+      inProgress.delete(operation)
+    }
   }
 
   const _removeMessage = (message: MessageToPublish<InsertResult>) => {
-    if (messages.length === 0) {
-      return
-    }
-
     const index = messages.findIndex(({ transaction }) => transaction.lsn === message.transaction.lsn)
 
     if (index !== -1) {
@@ -67,65 +68,69 @@ const createNonBlockingPublishingQueue = <InsertResult>(
     }
   }
 
-  const _getFirstMessagedThatIsDeliveredButNotAcked = () => {
-    return messages.find((message) => message.delivered)
+  const _acknowledgeDelivered = async () => {
+    if (isAcknowledging) {
+      return
+    }
+
+    isAcknowledging = true
+
+    try {
+      while (messages[0]?.delivered) {
+        const oldest = messages[0]
+
+        try {
+          await oldest.acknowledge()
+        } catch (error) {
+          console.error(error, 'acknowledge')
+          return
+        }
+
+        _removeMessage(oldest)
+      }
+    } finally {
+      isAcknowledging = false
+    }
+
+    if (messages.length === 0) {
+      publishingPromise.resolve()
+    }
   }
 
   const _publishMessage = async (message: MessageToPublish<InsertResult>) => {
-    const attemptedState = getState(message.transaction.lsn)
+    const state = getState(message.transaction.lsn)
 
-    if (attemptedState) {
-      attemptedState.failed = false
+    if (isDisposed || !state || state.delivered) {
+      return
     }
+
+    state.failed = false
 
     try {
       await publish(message)
-
-      // check if delivered message, is the next following transaction
-      // to not skip any message.
-      if (message.transaction.lsn === getNextTransactionLsnThatShouldBeDelivered()) {
-        await acknowledgmentQueue.waitFor(acknowledgmentQueue.queue(() => message.acknowledge()))
-        _removeMessage(message)
-
-        // check whether in the meantime newer messages have been delivered.
-        let messageToAck: StateMessage<InsertResult> | undefined
-        while ((messageToAck = _getFirstMessagedThatIsDeliveredButNotAcked())) {
-          const message = messageToAck
-          await acknowledgmentQueue.waitFor(acknowledgmentQueue.queue(() => message.acknowledge()))
-          _removeMessage(message)
-        }
-
-        if (messages.length === 0) {
-          publishingPromise.resolve()
-        }
-      } else {
-        const index = messages.findIndex(({ transaction }) => transaction.lsn === message.transaction.lsn)
-
-        if (index >= 0 && !messages[index].delivered) {
-          messages[index].delivered = true
-        }
-      }
-
-      return 'published'
-    } catch (error) {
-      const state = getState(message.transaction.lsn)
-
-      if (state) {
-        state.failed = true
-      }
-
+    } catch {
+      state.failed = true
       await onFailedPublish(message.transaction).catch((error) => console.error(error, 'onFailedPublish'))
+      return
     }
+
+    state.delivered = true
+
+    await _acknowledgeDelivered()
   }
 
-  let stopResending: () => void
-  if (options?.waitAfterFailedPublish?.ms !== 0) {
-    stopResending = createIntervalResendingStrategy<InsertResult>()({
-      getMessages: () => messages,
-      publishMessage: _publishMessage,
-      isPublishing: () => publishingPromise.isPending,
-      interval: options?.waitAfterFailedPublish || Duration.ofSeconds(30),
-    })
+  const stopResending = createIntervalResendingStrategy<InsertResult>()({
+    getMessages: () => messages,
+    publishMessage: (message) => _track(_publishMessage(message)),
+    acknowledgeDelivered: () => _track(_acknowledgeDelivered()),
+    isPublishing: () => publishingPromise.isPending,
+    interval: options?.waitAfterFailedPublish || Duration.ofSeconds(30),
+  })
+
+  const dispose = async () => {
+    isDisposed = true
+    stopResending()
+    await Promise.allSettled([...inProgress])
   }
 
   return {
@@ -134,7 +139,7 @@ const createNonBlockingPublishingQueue = <InsertResult>(
     run,
     size: () => messages.length,
     waitUntilIsEmpty: () => publishingPromise,
-    dispose: () => stopResending?.(),
+    dispose,
   }
 }
 

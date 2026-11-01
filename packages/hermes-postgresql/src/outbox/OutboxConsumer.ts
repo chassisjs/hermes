@@ -422,7 +422,7 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
     return async () => {
       const timeout = Duration.ofSeconds(1).ms
 
-      publishingQueue.dispose()
+      await Promise.race([publishingQueue.dispose(), setTimeout(Duration.ofSeconds(5).ms)])
 
       await swallow(() => killReplicationProcesses(this._sql!, slotName))
       await Promise.all([

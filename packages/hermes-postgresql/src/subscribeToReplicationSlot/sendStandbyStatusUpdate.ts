@@ -23,7 +23,7 @@ const createStandbyStatusUpdate = (lsn: Lsn): Buffer => {
 }
 
 const sendStandbyStatusUpdate = (stream: Writable, getLastAcknowledgedLsn: () => Lsn) => () => {
-  if (!stream) {
+  if (!stream?.writable) {
     return
   }
 

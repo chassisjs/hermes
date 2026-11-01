@@ -3,13 +3,17 @@ import { ResendingStrategy } from './typings.js'
 
 const createIntervalResendingStrategy =
   <InsertResult>(): ResendingStrategy<InsertResult> =>
-  ({ getMessages, publishMessage, isPublishing, interval }) => {
+  ({ getMessages, publishMessage, acknowledgeDelivered, isPublishing, interval }) => {
     const _iteration = () => {
+      if (getMessages()[0]?.delivered) {
+        void acknowledgeDelivered()
+      }
+
       // first failed and still not delivered.
       const failedMessage = getMessages().find((message) => !message.delivered && message.failed)
 
       if (failedMessage) {
-        publishMessage(failedMessage)
+        void publishMessage(failedMessage)
       }
 
       // if for some reason, a queue is not publishing and there are still not delivered messages,
@@ -17,7 +21,7 @@ const createIntervalResendingStrategy =
       const notDeliveredMessage = getMessages().find((message) => !message.delivered && !message.failed)
 
       if (!isPublishing() && notDeliveredMessage) {
-        publishMessage(notDeliveredMessage)
+        void publishMessage(notDeliveredMessage)
       }
     }
 

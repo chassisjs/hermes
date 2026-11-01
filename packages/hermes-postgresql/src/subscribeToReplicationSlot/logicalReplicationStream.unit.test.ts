@@ -58,7 +58,7 @@ const createReplicationStream = () => {
       // the status update reports the next WAL position to read from, so the acknowledged LSN is one less.
       .map((buffer) => convertBigIntToLsn(buffer.readBigUInt64BE(1) - 1n))
 
-  return { sql, receive, acknowledgedLsns, destroy: () => stream.destroy() }
+  return { sql, stream, receive, acknowledgedLsns, destroy: () => stream.destroy() }
 }
 
 describe('startLogicalReplication', () => {
@@ -101,5 +101,44 @@ describe('startLogicalReplication', () => {
     expect(acknowledgedLsns()).toEqual(['0/20', '0/30'])
 
     destroy()
+  })
+
+  test(`acknowledging after the stream is closed and a connection error without a query are handled`, async () => {
+    const { sql, stream, receive, acknowledgedLsns, destroy } = createReplicationStream()
+    const state: LogicalReplicationState = {
+      lastProcessedLsn: '0/10',
+      timestamp: new Date(),
+      publication: 'hermes_pub',
+      slotName: 'hermes_slot_app_default',
+    }
+    const unhandledRejections: unknown[] = []
+    const onUnhandledRejection = (reason: unknown) => unhandledRejections.push(reason)
+    const errors: unknown[] = []
+    const acknowledgments: (() => void)[] = []
+
+    process.on('unhandledRejection', onUnhandledRejection)
+    stream.on('error', (error) => errors.push(error))
+
+    await startLogicalReplication<Row>({
+      state,
+      sql,
+      columnConfig: { messageId: 'text' },
+      onInsert: async (_transaction, acknowledge) => {
+        acknowledgments.push(acknowledge)
+      },
+    })
+    await receive(begin('0/20', 1), insert('a1'), commit('0/20'))
+
+    stream.emit('error', Object.assign(new Error('closed'), { code: 'CONNECTION_CLOSED' }))
+    destroy()
+    acknowledgments[0]()
+    await setImmediate()
+
+    process.off('unhandledRejection', onUnhandledRejection)
+
+    expect(state.lastProcessedLsn).toBe('0/20')
+    expect(acknowledgedLsns()).toEqual([])
+    expect(errors).toHaveLength(1)
+    expect(unhandledRejections).toEqual([])
   })
 })
