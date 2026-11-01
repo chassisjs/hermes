@@ -18,8 +18,9 @@ const createSerializedPublishingQueue = <InsertResult>(
   const waitAfterFailedPublish = options?.waitAfterFailedPublish || Duration.ofSeconds(1)
   const onFailedPublish = options?.onFailedPublish || (() => Promise.resolve())
   const ids = new Set<Lsn>()
-  // LIFO
+  // FIFO
   const messages = new Array<MessageToPublish<InsertResult>>()
+  const disposal = new AbortController()
   let isPublishing = false
   let publishingPromise = CancellationPromise.resolved()
 
@@ -44,7 +45,7 @@ const createSerializedPublishingQueue = <InsertResult>(
   }
 
   const run = async () => {
-    if (isPublishing) {
+    if (isPublishing || disposal.signal.aborted) {
       return
     }
 
@@ -59,10 +60,10 @@ const createSerializedPublishingQueue = <InsertResult>(
           case 'published':
             continue
           case 'failed':
-            await onFailedPublish(messages[0].transaction)
+            await onFailedPublish(messages[0].transaction).catch((error) => console.error(error, 'onFailedPublish'))
 
             if (waitAfterFailedPublish) {
-              await setTimeout(waitAfterFailedPublish.ms)
+              await setTimeout(waitAfterFailedPublish.ms, undefined, { signal: disposal.signal }).catch(noop)
             }
 
             break
@@ -73,7 +74,7 @@ const createSerializedPublishingQueue = <InsertResult>(
           default:
             assertNever(result)
         }
-      } while (isPublishing)
+      } while (isPublishing && !disposal.signal.aborted)
     } finally {
       isPublishing = false
       publishingPromise.resolve()
@@ -89,16 +90,11 @@ const createSerializedPublishingQueue = <InsertResult>(
 
     try {
       await publish(oldest)
-      dequeueOldest()
       await oldest.acknowledge()
+      dequeueOldest()
 
       return 'published'
-    } catch (error) {
-      if (messages.length && messages[0].transaction.lsn !== oldest.transaction.lsn) {
-        // the message has been dequeued.
-        ids.add(oldest.transaction.lsn)
-        messages.unshift(oldest)
-      }
+    } catch {
       return 'failed'
     }
   }
@@ -109,7 +105,7 @@ const createSerializedPublishingQueue = <InsertResult>(
     run,
     size: () => messages.length,
     waitUntilIsEmpty: () => publishingPromise,
-    dispose: noop,
+    dispose: () => disposal.abort(),
   }
 }
 

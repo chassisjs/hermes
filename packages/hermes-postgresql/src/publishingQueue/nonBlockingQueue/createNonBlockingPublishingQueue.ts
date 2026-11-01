@@ -12,7 +12,7 @@ const createNonBlockingPublishingQueue = <InsertResult>(
   const onFailedPublish = options?.onFailedPublish || (() => Promise.resolve())
   const ids = new Set<Lsn>()
   const acknowledgmentQueue = createAsyncOpsQueue()
-  // LIFO
+  // FIFO
   const messages = new Array<StateMessage<InsertResult>>()
   let publishingPromise = CancellationPromise.resolved()
 
@@ -34,7 +34,7 @@ const createNonBlockingPublishingQueue = <InsertResult>(
     }
 
     ids.add(messageToPublish.transaction.lsn)
-    messages.push({ ...messageToPublish, delivered: false, failed: true })
+    messages.push({ ...messageToPublish, delivered: false, failed: false })
 
     return messageToPublish
   }
@@ -72,6 +72,12 @@ const createNonBlockingPublishingQueue = <InsertResult>(
   }
 
   const _publishMessage = async (message: MessageToPublish<InsertResult>) => {
+    const attemptedState = getState(message.transaction.lsn)
+
+    if (attemptedState) {
+      attemptedState.failed = false
+    }
+
     try {
       await publish(message)
 
@@ -96,7 +102,6 @@ const createNonBlockingPublishingQueue = <InsertResult>(
         const index = messages.findIndex(({ transaction }) => transaction.lsn === message.transaction.lsn)
 
         if (index >= 0 && !messages[index].delivered) {
-          console.log(`Processed ${messages[index].transaction.lsn}`)
           messages[index].delivered = true
         }
       }
@@ -109,7 +114,7 @@ const createNonBlockingPublishingQueue = <InsertResult>(
         state.failed = true
       }
 
-      await onFailedPublish(message.transaction)
+      await onFailedPublish(message.transaction).catch((error) => console.error(error, 'onFailedPublish'))
     }
   }
 

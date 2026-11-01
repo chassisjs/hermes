@@ -17,7 +17,6 @@ const createIntervalResendingStrategy =
       const notDeliveredMessage = getMessages().find((message) => !message.delivered && !message.failed)
 
       if (!isPublishing() && notDeliveredMessage) {
-        console.log('~~!!!!!!!!!!!!!!!!!!!')
         publishMessage(notDeliveredMessage)
       }
     }

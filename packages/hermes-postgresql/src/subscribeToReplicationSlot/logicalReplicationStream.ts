@@ -62,13 +62,14 @@ const startLogicalReplication = async <InsertResult>(params: LogicalReplicationP
     if (result.topLevelType === TopLevelType.PrimaryKeepaliveMessage && result.shouldPong) {
       acknowledgeLastLsn()
     } else if (result.topLevelType === TopLevelType.XLogData && result.messageType === MessageType.Commit) {
+      // the acknowledgment happens asynchronously, when `currentTransaction` may already be the next transaction being received.
+      const transaction = currentTransaction
       const acknowledge = () => {
-        sendStandbyStatusUpdate(stream, () => params.state.lastProcessedLsn)
-        state.lastProcessedLsn = currentTransaction.lsn
-        currentTransaction = emptyTransaction(state.lastProcessedLsn)
+        state.lastProcessedLsn = transaction.lsn
+        acknowledgeLastLsn()
       }
 
-      onInsert(currentTransaction, acknowledge)
+      onInsert(transaction, acknowledge)
     }
   }
 

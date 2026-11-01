@@ -217,4 +217,82 @@ describe(`createNonBlockingPublishingQueue`, () => {
 
     dispose()
   })
+
+  test(`a message that is still being published is not resent`, async () => {
+    const mockPublish = jest
+      .fn<(messageToPublish: MessageToPublish<InsertResult>) => Promise<void>>()
+      .mockImplementation(() => setTimeout(300))
+    const { queue, run, dispose } = createNonBlockingPublishingQueue(mockPublish, {
+      waitAfterFailedPublish: Duration.ofMiliseconds(50),
+    })
+    const message = createMockMessage('0/1')
+
+    await run(queue(message))
+
+    expect(mockPublish).toHaveBeenCalledTimes(1)
+    expect(message.acknowledge).toHaveBeenCalledTimes(1)
+
+    dispose()
+  })
+
+  test(`a permanently failing message blocks acknowledgment of the younger messages, but not their publishing`, async () => {
+    const publishedMessages: Lsn[] = []
+    const mockPublish = jest
+      .fn<(messageToPublish: MessageToPublish<InsertResult>) => Promise<void>>()
+      .mockImplementation(async (message) => {
+        if (message.transaction.lsn === '0/1') {
+          throw new Error()
+        }
+        publishedMessages.push(message.transaction.lsn)
+      })
+    const onFailedPublish = jest.fn(async (_tx: Transaction<InsertResult>) => {})
+    const { queue, run, size, dispose } = createNonBlockingPublishingQueue(mockPublish, {
+      waitAfterFailedPublish: Duration.ofSeconds(0),
+      onFailedPublish,
+    })
+    const messages = [createMockMessage('0/1'), createMockMessage('0/2'), createMockMessage('0/3')]
+
+    await Promise.all(messages.map((message) => run(queue(message))))
+
+    expect(publishedMessages).toEqual(['0/2', '0/3'])
+    expect(onFailedPublish).toHaveBeenCalledWith(messages[0].transaction)
+    messages.forEach((message) => expect(message.acknowledge).not.toHaveBeenCalled())
+    expect(size()).toBe(3)
+
+    dispose()
+  })
+
+  test(`'run' does not reject when 'onFailedPublish' throws`, async () => {
+    const mockPublish = jest
+      .fn<(messageToPublish: MessageToPublish<InsertResult>) => Promise<void>>()
+      .mockRejectedValue(new Error('Publish failed'))
+    const { queue, run, dispose } = createNonBlockingPublishingQueue(mockPublish, {
+      waitAfterFailedPublish: Duration.ofSeconds(0),
+      onFailedPublish: () => Promise.reject(new Error('could not report the failure')),
+    })
+
+    await expect(run(queue(createMockMessage('0/1')))).resolves.toBeUndefined()
+
+    dispose()
+  })
+
+  test(`stops resending after 'dispose'`, async () => {
+    const mockPublish = jest
+      .fn<(messageToPublish: MessageToPublish<InsertResult>) => Promise<void>>()
+      .mockRejectedValue(new Error('Publish failed'))
+    const { queue, run, dispose } = createNonBlockingPublishingQueue(mockPublish, {
+      waitAfterFailedPublish: Duration.ofMiliseconds(50),
+    })
+
+    await run(queue(createMockMessage('0/1')))
+    await setTimeout(120)
+    dispose()
+
+    const calls = mockPublish.mock.calls.length
+
+    await setTimeout(200)
+
+    expect(calls).toBeGreaterThan(1)
+    expect(mockPublish).toHaveBeenCalledTimes(calls)
+  })
 })
