@@ -76,10 +76,14 @@ The async outbox of a consumer publishes only the messages of the consumer's `co
 
 `send(message, tx)` still works: the second parameter is either a transaction or `{ tx, partitionKey }`.
 
-Hermes adds the columns `partitionKey`, `nextAttemptAt`, `claimedBy` and `claimedUntil` to the `asyncOutbox` table, and the `asyncOutboxPartition` table with the claims of the partitions, when the consumer starts. Earlier versions did not store the partition of a message, so the messages they stored have no partition (`NULL`), also the ones stored by instances of an earlier version during a rolling deployment. Hermes cannot know their partition:
+Hermes adds the columns `partitionKey`, `nextAttemptAt`, `claimedBy` and `claimedUntil` to the `asyncOutbox` table, and the `asyncOutboxPartition` table with the claims of the partitions, when the consumer starts. Earlier versions did not store the partition of a message, so the messages they stored get the `'default'` partition (the default value of the column), also the ones stored by instances of an earlier version during a rolling deployment:
 
-- The consumer of the `'default'` partition (a consumer without `partitionKey`) takes them over and publishes them.
-- A consumer of another partition never publishes them, so the messages of one tenant do not go to another one. When all your consumers have other partitions, let the async outbox publish all its messages before you upgrade (`SELECT COUNT(*) FROM "asyncOutbox" WHERE "delivered" = false`), or move the messages to the right partitions after the upgrade, when no instance of an earlier version runs: `UPDATE "asyncOutbox" SET "partitionKey" = 'tenant-1' WHERE "partitionKey" IS NULL AND ...`.
+- The consumer of the `'default'` partition (a consumer without `partitionKey`) publishes them.
+- A consumer of another partition never publishes them, so the messages of one tenant do not go to another one. When all your consumers have other partitions, let the async outbox publish all its messages before you upgrade (`SELECT COUNT(*) FROM "asyncOutbox" WHERE "delivered" = false`), or move the messages to the right partitions after the upgrade, when no instance of an earlier version runs: `UPDATE "asyncOutbox" SET "partitionKey" = 'tenant-1' WHERE "partitionKey" = 'default' AND ...`.
+
+::: warning Rolling deployment
+Instances of an earlier version do not know the partitions and the claims. They publish all the undelivered messages of their `consumerName`, of every partition, also the ones that the new instances are publishing at the same time. Until the last old instance stops, a message can go through the `publish` of a consumer of another partition (another tenant), be published twice, or out of order. When that matters, stop all the old instances before you start the new ones.
+:::
 
 ## Your own store
 

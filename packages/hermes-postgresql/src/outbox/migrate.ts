@@ -71,7 +71,7 @@ export const migrate = async (sql: Sql, slotName: string) => {
 
   await sql`
     ALTER TABLE "asyncOutbox"
-      ADD COLUMN IF NOT EXISTS "partitionKey"   VARCHAR(30)   NULL,
+      ADD COLUMN IF NOT EXISTS "partitionKey"   VARCHAR(250)  DEFAULT 'default' NOT NULL,
       ADD COLUMN IF NOT EXISTS "nextAttemptAt"  TIMESTAMPTZ   NULL,
       ADD COLUMN IF NOT EXISTS "claimedBy"      VARCHAR(250)  NULL,
       ADD COLUMN IF NOT EXISTS "claimedUntil"   TIMESTAMPTZ   NULL;
@@ -83,7 +83,7 @@ export const migrate = async (sql: Sql, slotName: string) => {
   await sql`
     CREATE TABLE IF NOT EXISTS "asyncOutboxPartition" (
       "consumerName"  VARCHAR(30)   NOT NULL,
-      "partitionKey"  VARCHAR(30)   NOT NULL,
+      "partitionKey"  VARCHAR(250)  NOT NULL,
       "claimedBy"     VARCHAR(250)  NULL,
       "claimedUntil"  TIMESTAMPTZ   NULL,
       PRIMARY KEY ("consumerName", "partitionKey")

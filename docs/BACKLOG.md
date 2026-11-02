@@ -6,7 +6,7 @@ Known issues and improvements that are not scheduled yet.
 
 **Type:** improvement · **Package:** `@chassisjs/hermes-postgresql`
 
-The `partitionKey` columns (`outbox`, `outboxConsumer`, `asyncOutbox`, `asyncOutboxPartition`) and `consumerName` are `VARCHAR(30)` (`packages/hermes-postgresql/src/outbox/migrate.ts`), so a UUID (36 characters) does not fit. Widen them (e.g. to `VARCHAR(250)`) with `ALTER TABLE ... ALTER COLUMN ... TYPE`, which in PostgreSQL does not rewrite the table when only the length grows. Check that the `outbox` table, which is in the publication, keeps streaming after the change.
+The `partitionKey` columns of the logical replication (`outbox`, `outboxConsumer`) and the `consumerName` columns are `VARCHAR(30)` (`packages/hermes-postgresql/src/outbox/migrate.ts`), so a UUID (36 characters) does not fit. The async outbox (`asyncOutbox`, `asyncOutboxPartition`) has `VARCHAR(250)` already. The partition key of the logical replication is also a part of the slot name, which allows only 63 lower case letters, digits and `_`, so a UUID does not work there anyway. Widen them (e.g. to `VARCHAR(250)`) with `ALTER TABLE ... ALTER COLUMN ... TYPE`, which in PostgreSQL does not rewrite the table when only the length grows. Check that the `outbox` table, which is in the publication, keeps streaming after the change.
 
 ## No lock against a second instance of a partition (MongoDB)
 

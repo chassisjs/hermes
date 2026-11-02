@@ -29,15 +29,10 @@ type PollingStoreScope = {
  * The claims use `SELECT ... FOR UPDATE SKIP LOCKED`, and all the times are computed with the clock of PostgreSQL.
  *
  * The partitions with undelivered messages are found with a skip scan of the `asyncOutboxPendingIdx` index (one index
- * lookup per partition), so the cost of a poll does not grow with the number of undelivered messages. The partitions
- * without undelivered messages are removed from `asyncOutboxPartition`; the next poll adds them again when they get
- * new messages, so a message that commits during the removal is not lost.
- *
- * Earlier versions did not store the partition of a message, so their messages have no partition (`NULL`). Hermes
- * cannot know their partition, so only a store of the `'default'` partition (or of all partitions) takes them over, at
- * every claim: also the messages stored by instances of an earlier version during a rolling deployment. A consumer of
- * another partition never publishes them, so the messages of one tenant never go to another one. Move them to the
- * right partition yourself when your consumers have other partitions.
+ * lookup per partition), so the cost of a poll does not grow with the number of undelivered messages, but it grows
+ * with the number of partitions that have them. The partitions without undelivered messages are removed from
+ * `asyncOutboxPartition`; the next poll adds them again when they get new messages, so a message that commits during
+ * the removal is not lost.
  *
  * `markFailed` changes a message only when `owner` still has the claim of the message, or of its partition when the
  * message itself is not claimed (`usePartitionOrderingPolicy`). It locks the partition (`FOR SHARE`), so it waits for
@@ -71,17 +66,6 @@ const createPollingStore = <Message>(
     return partitionKey === undefined
       ? sql`${sql(table)}."consumerName" = ${consumerName}`
       : sql`${sql(table)}."consumerName" = ${consumerName} AND ${sql(table)}."partitionKey" = ${partitionKey}`
-  }
-
-  const adoptsLegacyMessages = partitionKey === undefined || partitionKey === 'default'
-  const adoptLegacyMessages = async () => {
-    if (adoptsLegacyMessages) {
-      await getSql()`
-        UPDATE "asyncOutbox"
-        SET "partitionKey" = 'default'
-        WHERE "consumerName" = ${consumerName} AND "partitionKey" IS NULL AND "delivered" = false
-      `
-    }
   }
 
   return {
@@ -119,15 +103,12 @@ const createPollingStore = <Message>(
     },
 
     async claimMessages({ owner, lease, limit }) {
-      await adoptLegacyMessages()
-
       const rows = await getSql()<AsyncOutboxRow<Message>[]>`
         UPDATE "asyncOutbox"
         SET "claimedBy" = ${owner}, "claimedUntil" = ${after(lease)}
         WHERE "position" IN (
           SELECT "position" FROM "asyncOutbox"
           WHERE ${inScope('asyncOutbox')}
-            AND "partitionKey" IS NOT NULL
             AND "delivered" = false
             AND ("nextAttemptAt" IS NULL OR "nextAttemptAt" <= now())
             AND ("claimedUntil" IS NULL OR "claimedUntil" < now())
@@ -163,8 +144,6 @@ const createPollingStore = <Message>(
 
     async claimPartitions({ owner, lease, limit }) {
       const sql = getSql()
-
-      await adoptLegacyMessages()
 
       await sql`
         WITH RECURSIVE "pending" AS (

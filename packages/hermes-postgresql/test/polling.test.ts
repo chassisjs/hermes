@@ -301,14 +301,12 @@ describe('Async outbox', () => {
 
       await setTimeout(300)
 
-      // earlier versions did not store the partition, so a consumer of another partition must not take the message
       expect(tenantPublished).toEqual([])
 
       const stopDefault = createConsumer('default', published).start()
 
       await waitUntil(() => published.length === 1)
 
-      // an instance of an earlier version stores a message during a rolling deployment
       await sql`
         INSERT INTO "asyncOutbox" ("consumerName", "messageId", "messageType", "data")
         VALUES ('app', 'during-deployment', 'Test', '{}'::jsonb)
