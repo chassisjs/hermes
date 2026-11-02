@@ -2,7 +2,7 @@ import { assert, createPollingOutbox, useNoOrderingPolicy, usePartitionOrderingP
 import { createPool, type Pool } from 'mysql2/promise'
 import { createPollingStore } from './createPollingStore.js'
 import { migrate } from './migrate.js'
-import { insertRowsAtomically, OutboxTable } from './sql.js'
+import { createPollingPool, insertRowsAtomically, OutboxTable } from './sql.js'
 import { type ConsumerCreationParams, type JSONValue, type OutboxConsumer } from './types.js'
 
 /**
@@ -16,6 +16,10 @@ import { type ConsumerCreationParams, type JSONValue, type OutboxConsumer } from
  * published by one instance at a time, in the order of the positions, and the instances share the partitions.
  *
  * Delivery is at-least-once, so make the handlers of the messages idempotent, e.g. with the `messageId`.
+ *
+ * `start()` polls with its own pool ({@link createPollingPool}), which runs in `READ COMMITTED`, and `stop()` closes
+ * it. `queue()` without `tx` and `getDbConnection()` use another pool, which `stop()` does not close, because the
+ * application may still use it; close it with `getDbConnection().end()`.
  *
  * @template Message - The type of the messages
  *
@@ -48,28 +52,11 @@ const createOutboxConsumer = <Message extends JSONValue>(
 ): OutboxConsumer<Message> => {
   const { consumerName, partitionKey } = params
   let pool: Pool | null = null
-  let isPoolShared = false
   let isStarted = false
   const getPool = () => {
-    if (!pool) {
-      pool = createPool({ ...params.getOptions(), supportBigNumbers: true, bigNumberStrings: true })
-      isPoolShared = false
-    }
+    pool ??= createPool({ ...params.getOptions(), supportBigNumbers: true, bigNumberStrings: true })
 
     return pool
-  }
-  const getSharedPool = () => {
-    const shared = getPool()
-
-    isPoolShared = true
-
-    return shared
-  }
-  const closePool = async () => {
-    const closing = pool
-
-    pool = null
-    await closing?.end()
   }
 
   return {
@@ -78,21 +65,20 @@ const createOutboxConsumer = <Message extends JSONValue>(
 
       isStarted = true
 
+      const pollingPool = createPollingPool(params.getOptions())
+
       try {
         if (params.migrate !== false) {
-          await migrate(getPool())
+          await migrate(pollingPool)
         }
       } catch (error) {
         isStarted = false
-
-        if (!isPoolShared) {
-          await closePool().catch(() => {})
-        }
+        await pollingPool.end().catch(() => {})
 
         throw error
       }
 
-      const store = createPollingStore<Message>(getPool, { consumerName, partitionKey })
+      const store = createPollingStore<Message>(() => pollingPool, { consumerName, partitionKey })
       const stopPolling = createPollingOutbox<Message>({
         policy:
           params.ordering === 'none'
@@ -122,7 +108,7 @@ const createOutboxConsumer = <Message extends JSONValue>(
         stopping ??= (async () => {
           try {
             await stopPolling()
-            await closePool()
+            await pollingPool.end()
           } finally {
             isStarted = false
           }
@@ -136,7 +122,7 @@ const createOutboxConsumer = <Message extends JSONValue>(
       const messages = Array.isArray(message) ? message : [message]
 
       await insertRowsAtomically(
-        getSharedPool(),
+        getPool(),
         options?.tx,
         OutboxTable,
         [
@@ -156,7 +142,7 @@ const createOutboxConsumer = <Message extends JSONValue>(
       )
     },
 
-    getDbConnection: getSharedPool,
+    getDbConnection: getPool,
   }
 }
 

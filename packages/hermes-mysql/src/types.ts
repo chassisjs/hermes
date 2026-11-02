@@ -173,7 +173,7 @@ type OutboxConsumer<Message extends JSONValue> = {
    * Runs the migrations (unless `migrate` is `false`) and starts polling the outbox.
    *
    * @returns A function that stops polling, waits for the message being published, releases the claims and closes
-   * the pool.
+   * the pool that Hermes polls with. It does not close the pool of {@link getDbConnection}.
    */
   start(): Promise<Stop>
 
@@ -185,9 +185,9 @@ type OutboxConsumer<Message extends JSONValue> = {
   queue(message: MessageEnvelope<Message> | MessageEnvelope<Message>[], options?: PublishOptions): Promise<void>
 
   /**
-   * Returns the pool of Hermes. `stop()` closes it, and the next `start()` or `queue()` creates a new one, so get the
-   * pool again after a restart. A failed `start()` does not close the pool once it was used by `queue()` or returned by
-   * this method.
+   * Returns the pool that `queue()` uses without `tx`. It is created on the first call and stays open after `stop()`,
+   * so the application can keep using it; close it with `end()` when the application shuts down. Hermes polls with
+   * another pool.
    */
   getDbConnection(): Pool
 }

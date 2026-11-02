@@ -1,15 +1,17 @@
 import { Duration } from '@chassisjs/hermes'
-import { afterAll, beforeAll, describe, expect, jest, test } from '@jest/globals'
+import { afterAll, afterEach, beforeAll, describe, expect, jest, test } from '@jest/globals'
 import { CompiledQuery, Kysely, MysqlDialect } from 'kysely'
 import { createPool as createCallbackPool } from 'mysql2'
 import { type Pool, type PoolOptions, type RowDataPacket } from 'mysql2/promise'
 import { setTimeout } from 'node:timers/promises'
 import {
   createOutboxConsumer,
+  createPollingPool,
   createPollingStore,
   type ConsumerCreationParams,
   type HermesMessageEnvelope,
   migrate,
+  type OutboxConsumer,
 } from '../src/index.js'
 import { createMySql } from './mysql.js'
 
@@ -40,18 +42,34 @@ const envelope = (messageId: string, value = 1) => ({
   message: { name: 'Test', value },
 })
 
+const consumers: OutboxConsumer<Event>[] = []
+
+afterEach(async () => {
+  for (const consumer of consumers.splice(0)) {
+    await consumer
+      .getDbConnection()
+      .end()
+      .catch(() => {})
+  }
+})
+
 const createConsumer = (
   options: PoolOptions,
   publish: ConsumerCreationParams<Event>['publish'],
   params?: Partial<ConsumerCreationParams<Event>>,
-) =>
-  createOutboxConsumer<Event>({
+) => {
+  const consumer = createOutboxConsumer<Event>({
     getOptions: () => options,
     publish,
     consumerName: 'app',
     pollInterval: Duration.ofMiliseconds(50),
     ...params,
   })
+
+  consumers.push(consumer)
+
+  return consumer
+}
 
 const select = async <T>(pool: Pool, sql: string) => {
   const [rows] = await pool.query<RowDataPacket[]>(sql)
@@ -477,9 +495,12 @@ describe('Review fixes', () => {
   })
 
   test('a failure reported after the claim expired keeps the claim of another instance', async () => {
-    await mysql.withDatabase(async ({ options, pool }) => {
+    await mysql.withDatabase(async ({ options, pool, onDispose }) => {
       const outbox = createConsumer(options, () => {})
-      const store = createPollingStore<Event>(() => pool, { consumerName: 'app' })
+      const pollingPool = createPollingPool(options)
+      const store = createPollingStore<Event>(() => pollingPool, { consumerName: 'app' })
+
+      onDispose(() => pollingPool.end())
 
       await migrate(pool)
       await outbox.queue(envelope('m1'))
@@ -512,9 +533,12 @@ describe('Review fixes', () => {
   })
 
   test('finds the partitions with undelivered messages, also more than 1000 of them, and removes the empty ones', async () => {
-    await mysql.withDatabase(async ({ options, pool }) => {
+    await mysql.withDatabase(async ({ options, pool, onDispose }) => {
       const outbox = createConsumer(options, () => {})
-      const store = createPollingStore<Event>(() => pool, { consumerName: 'app' })
+      const pollingPool = createPollingPool(options)
+      const store = createPollingStore<Event>(() => pollingPool, { consumerName: 'app' })
+
+      onDispose(() => pollingPool.end())
       const count = async () =>
         Number(
           (await select<{ count: string }>(pool, 'SELECT COUNT(*) AS count FROM `hermes_outbox_partition`'))[0].count,
@@ -562,10 +586,34 @@ describe('Review fixes', () => {
     })
   })
 
-  test('with partition ordering, a failure reported by an instance that lost the partition is ignored', async () => {
-    await mysql.withDatabase(async ({ options, pool }) => {
+  test('stop() closes only the pool that Hermes polls with, which runs in READ COMMITTED', async () => {
+    await mysql.withDatabase(async ({ options, onDispose }) => {
       const outbox = createConsumer(options, () => {})
-      const store = createPollingStore<Event>(() => pool, { consumerName: 'app' })
+      const pollingPool = createPollingPool(options)
+
+      onDispose(() => pollingPool.end())
+
+      const stop = await outbox.start()
+
+      await outbox.queue(envelope('m1'))
+      await stop()
+
+      expect(await select(outbox.getDbConnection(), 'SELECT @@transaction_isolation AS `isolation`')).toEqual([
+        { isolation: 'REPEATABLE-READ' },
+      ])
+      expect(await select(pollingPool, 'SELECT @@transaction_isolation AS `isolation`')).toEqual([
+        { isolation: 'READ-COMMITTED' },
+      ])
+    })
+  })
+
+  test('with partition ordering, a failure reported by an instance that lost the partition is ignored', async () => {
+    await mysql.withDatabase(async ({ options, pool, onDispose }) => {
+      const outbox = createConsumer(options, () => {})
+      const pollingPool = createPollingPool(options)
+      const store = createPollingStore<Event>(() => pollingPool, { consumerName: 'app' })
+
+      onDispose(() => pollingPool.end())
 
       await migrate(pool)
       await outbox.queue(envelope('m1'))

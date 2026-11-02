@@ -1,4 +1,5 @@
-import { type Pool, type PoolConnection } from 'mysql2/promise'
+import { createPool } from 'mysql2'
+import { type Pool, type PoolConnection, type PoolOptions } from 'mysql2/promise'
 import { type QueryExecutor } from './types.js'
 
 const OutboxTable = 'hermes_outbox'
@@ -7,16 +8,36 @@ const MigrationTable = 'hermes_migrations'
 const MaxRowsPerStatement = 1000
 
 /**
- * Runs `work` in a transaction on one connection of the pool.
+ * Creates the pool that Hermes polls the outbox with.
  *
- * `READ COMMITTED` keeps the locking reads (`FOR UPDATE SKIP LOCKED`) from locking the gaps between the rows, which
- * would stop the application from inserting new messages until the transaction ends.
+ * Every connection of the pool runs in `READ COMMITTED`, so the locking reads (`FOR UPDATE SKIP LOCKED`) and the
+ * statements that change rows lock only the rows, not the gaps between them, which would stop the application from
+ * inserting new messages. Keep it apart from the pool of the application, so the isolation level of the application
+ * does not change.
+ *
+ * @param options - The options of the `mysql2` pool
+ */
+const createPollingPool = (options: PoolOptions): Pool => {
+  const pool = createPool({ ...options, supportBigNumbers: true, bigNumberStrings: true })
+
+  pool.on('connection', (connection) => {
+    connection.query('SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED', (error) => {
+      if (error) {
+        connection.destroy()
+      }
+    })
+  })
+
+  return pool.promise()
+}
+
+/**
+ * Runs `work` in a transaction on one connection of the pool.
  */
 const inTransaction = async <T>(pool: Pool, work: (connection: PoolConnection) => Promise<T>): Promise<T> => {
   const connection = await pool.getConnection()
 
   try {
-    await connection.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     await connection.beginTransaction()
 
     const result = await work(connection)
@@ -27,22 +48,6 @@ const inTransaction = async <T>(pool: Pool, work: (connection: PoolConnection) =
   } catch (error) {
     await connection.rollback().catch(() => {})
     throw error
-  } finally {
-    connection.release()
-  }
-}
-
-/**
- * Runs one statement that changes rows, as its own `READ COMMITTED` transaction: `SET TRANSACTION` applies to the next
- * transaction of the connection, which is the statement itself in the autocommit mode. So the statement locks only the
- * rows it changes, not the gaps between them, and does not block the inserts of the application.
- */
-const writeReadCommitted = async (pool: Pool, text: string, params: unknown[]) => {
-  const connection = await pool.getConnection()
-
-  try {
-    await connection.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-    await connection.query(text, params)
   } finally {
     connection.release()
   }
@@ -91,6 +96,7 @@ const insertRowsAtomically = async (
 }
 
 export {
+  createPollingPool,
   inTransaction,
   insertRowsAtomically,
   insertStatements,
@@ -98,5 +104,4 @@ export {
   MigrationTable,
   OutboxTable,
   PartitionTable,
-  writeReadCommitted,
 }

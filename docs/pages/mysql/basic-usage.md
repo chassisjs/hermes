@@ -28,11 +28,18 @@ const outbox = createOutboxConsumer<DomainEvent>({
 })
 
 const stop = await outbox.start()
-
-process.on('SIGTERM', () => stop())
 ```
 
-`start()` runs the migrations and starts polling. `stop()` waits for the message being published, releases the claims of this instance and closes the pool.
+`start()` runs the migrations and starts polling with its own pool, whose connections run in `READ COMMITTED`. `stop()` waits for the message being published, releases the claims of this instance and closes that pool.
+
+`queue()` without `tx` and `getDbConnection()` use another pool, created on the first use. `stop()` does not close it, because your application may still use it, so close it when the application shuts down:
+
+```typescript
+process.on('SIGTERM', async () => {
+  await stop()
+  await outbox.getDbConnection().end()
+})
+```
 
 `publish` gets:
 
