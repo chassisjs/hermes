@@ -33,6 +33,7 @@ hermes/
 
 - **Location:** `packages/hermes`
 - **Description:** Core package with shared utilities, types, and base functionality
+- **Polling outbox:** `src/pollingOutbox` has the database-independent engine (`createPollingOutbox`) and the ordering policies (`usePartitionOrderingPolicy`, `useNoOrderingPolicy`). Databases provide a store (e.g. `createPollingStore` in hermes-postgresql, used by the async outbox)
 - **Main Dependencies:** `uuid@~14.0.3`
 - **Node:** `>=18.20.3` (`engines`)
 - **Exports:** `./lib/index.cjs` (CommonJS), `./lib/index.mjs` (ESM)
@@ -50,7 +51,7 @@ hermes/
 - **Location:** `packages/hermes-postgresql`
 - **Description:** PostgreSQL-specific Outbox Pattern implementation using logical replication
 - **Dependencies:** `fp-ts@~2.16.11`, `postgres@~4.0.0`, `nodemon@~3.1.14`
-- **Peer Dependencies:** `@chassisjs/hermes@~1.0.0-alpha.15`
+- **Peer Dependencies:** `@chassisjs/hermes@~1.0.0-alpha.15`. The async outbox uses the polling outbox of the core package (from `1.0.0-alpha.20`), so the minimum has to be raised in the release that publishes it. It cannot be raised earlier: npm resolves the range against the local workspace version and the registry, so `~1.0.0-alpha.20` fails with `ETARGET` until that version exists, and the pre-commit hook (`npm install --package-lock-only`) fails with it. Lerna does not bump plain `peerDependencies` ranges (only `workspace:` ones, which npm does not support). So bump the versions without a commit (`npx lerna version prerelease --preid alpha --no-git-tag-version --no-push --yes`), set the peer range to the new version, run `npm install --package-lock-only`, commit with the usual release message, tag `vX.Y.Z`, push, and publish with `npx lerna publish from-package --yes --ignore-scripts`
 - **Node:** `^20.19.0 || >=22.12.0` (`engines`). `postgres@4` (Postgres.js) is ESM-only, so the CommonJS build (`lib/index.cjs`) needs `require(esm)`, which Node enables by default from 20.19 and 22.12
 - **Own types:** `JSONValue`, `QueryExecutor` and `OutboxTransaction` are defined in Hermes (`src/common/types.ts`); Postgres.js 4 no longer exports `JSONValue`
 

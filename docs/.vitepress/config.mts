@@ -25,6 +25,7 @@ export default defineConfig({
       { text: 'What is Hermes', link: '/pages/what-is-hermes.md' },
       { text: 'Getting Started', link: '/pages/getting-started.md' },
       { text: 'Multi-tenancy', link: '/pages/multi-tenancy.md' },
+      { text: 'Polling outbox', link: '/pages/polling-outbox.md' },
       { text: 'Every* system is distributed (essay)', link: 'https://www.knowhowcode.dev/articles/outbox/' },
       {
         text: 'PostgreSQL',

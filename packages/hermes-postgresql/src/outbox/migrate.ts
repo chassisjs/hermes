@@ -70,6 +70,27 @@ export const migrate = async (sql: Sql, slotName: string) => {
   await sql`CREATE INDEX IF NOT EXISTS "asyncOutboxDeliveredWithDateIdx" ON "asyncOutbox" ("delivered" ASC, "addedAt" ASC);`
 
   await sql`
+    ALTER TABLE "asyncOutbox"
+      ADD COLUMN IF NOT EXISTS "partitionKey"   VARCHAR(30)   DEFAULT 'default' NOT NULL,
+      ADD COLUMN IF NOT EXISTS "nextAttemptAt"  TIMESTAMPTZ   NULL,
+      ADD COLUMN IF NOT EXISTS "claimedBy"      VARCHAR(250)  NULL,
+      ADD COLUMN IF NOT EXISTS "claimedUntil"   TIMESTAMPTZ   NULL;
+  `
+  await sql`
+    CREATE INDEX IF NOT EXISTS "asyncOutboxPendingIdx" ON "asyncOutbox" ("consumerName", "partitionKey", "position")
+    WHERE "delivered" = false;
+  `
+  await sql`
+    CREATE TABLE IF NOT EXISTS "asyncOutboxPartition" (
+      "consumerName"  VARCHAR(30)   NOT NULL,
+      "partitionKey"  VARCHAR(30)   NOT NULL,
+      "claimedBy"     VARCHAR(250)  NULL,
+      "claimedUntil"  TIMESTAMPTZ   NULL,
+      PRIMARY KEY ("consumerName", "partitionKey")
+    );
+  `
+
+  await sql`
     CREATE TABLE IF NOT EXISTS "outboxConsumer" (
       "id"                      BIGSERIAL         PRIMARY KEY,
       "consumerName"            VARCHAR(30)       NOT NULL,

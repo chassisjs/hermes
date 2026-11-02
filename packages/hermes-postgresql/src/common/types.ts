@@ -278,7 +278,10 @@ type IOutboxConsumer<Message extends JSONValue> = {
   /** Queues messages to the primary outbox (WAL-based, guaranteed delivery) */
   queue: Publish<Message>
   /** Sends messages to the async outbox (polling-based, eventual delivery) */
-  send: (message: MessageEnvelope<Message> | MessageEnvelope<Message>[], tx?: OutboxTransaction) => Promise<void>
+  send: (
+    message: MessageEnvelope<Message> | MessageEnvelope<Message>[],
+    txOrOptions?: OutboxTransaction | PublishOptions,
+  ) => Promise<void>
   /** Gets the underlying PostgreSQL connection */
   getDbConnection(): Sql
   /** Gets the consumer configuration parameters */

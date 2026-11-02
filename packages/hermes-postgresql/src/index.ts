@@ -221,4 +221,9 @@ export {
 } from './common/types.js'
 export { createOutboxConsumer } from './outbox/createOutboxConsumer.js'
 export { OutboxConsumer } from './outbox/OutboxConsumer.js'
-export { useBasicAsyncOutboxConsumerPolicy, type UseAsyncOutboxPolicy } from './policies/useBasicAsyncStoragePolicy.js'
+export { createPollingStore, type PollingStoreScope } from './asyncOutbox/createPollingStore.js'
+export {
+  useBasicAsyncOutboxConsumerPolicy,
+  type AsyncOutboxPolicyOptions,
+  type UseAsyncOutboxPolicy,
+} from './policies/useBasicAsyncStoragePolicy.js'

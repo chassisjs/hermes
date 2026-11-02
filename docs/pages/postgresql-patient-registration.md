@@ -200,7 +200,7 @@ const stopOutbox = await outbox.start()
 - `getOptions()`: Database connection details
 - `publish`: Callback invoked for each message (must throw on failure)
 - `consumerName`: Unique name for this consumer (used for replication slot)
-- `asyncOutbox`: Separate queue for non-critical messages (compensations, notifications)
+- `asyncOutbox`: Separate queue for non-critical messages (compensations, notifications). It polls the `asyncOutbox` table, see [Polling outbox](/pages/polling-outbox.md)
 
 ### 3. Implement Message Handlers
 
@@ -481,7 +481,7 @@ await outbox.queue(criticalEvent)
 await outbox.send(compensationCommand)
 ```
 
-This reduces WAL retention requirements and improves performance.
+This reduces WAL retention requirements and improves performance. See [Polling outbox](/pages/polling-outbox.md) for how the async outbox orders and retries the messages.
 
 ### 5. Graceful Error Handling with Retry Limits
 

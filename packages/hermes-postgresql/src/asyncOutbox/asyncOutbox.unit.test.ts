@@ -1,243 +1,68 @@
 import { Duration } from '@chassisjs/hermes'
-import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals'
-import { setTimeout } from 'node:timers/promises'
-import postgres from 'postgres'
-import { JSONValue } from '../common/types.js'
-import { AsyncOutboxConsumer, HermesAsyncMessageEnvelope } from './AsyncOutboxConsumer.js'
+import { describe, expect, jest, test } from '@jest/globals'
+import { AsyncOutboxConsumer } from './AsyncOutboxConsumer.js'
 
-type Patamter = {
-  type: number
-  value: string | null
-  raw: unknown | null
-}
-
-// Mock the postgres sql template literal function
-const mockJsonValue = {
-  type: 1,
-  value: '{}',
-  raw: '{}',
-}
 const createMockSql = () => {
-  const sql = jest.fn<(...p: (string | string[] | Patamter)[]) => postgres.RowList<postgres.Row[]>>()
+  const sql = jest.fn().mockReturnValue(Promise.resolve([]))
 
-  Object.assign(sql, {
-    end: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
-    json: jest.fn<(p: JSONValue) => postgres.Parameter>().mockReturnValue(mockJsonValue as any),
+  return Object.assign(sql, {
     unsafe: jest.fn<(text: string, params?: unknown[]) => Promise<unknown[]>>().mockResolvedValue([]),
   })
-  return sql
 }
 
-const createPublish = () => {
-  return jest
-    .fn<(message: HermesAsyncMessageEnvelope<any> | HermesAsyncMessageEnvelope<any>[]) => Promise<void>>()
-    .mockResolvedValue(undefined)
+const createConsumer = (getSql: () => unknown) =>
+  new AsyncOutboxConsumer({
+    getSql: getSql as never,
+    publish: async () => {},
+    consumerName: 'test-consumer',
+    checkInterval: Duration.ofSeconds(1),
+  })
+
+const message = {
+  messageId: 'test-id',
+  messageType: 'test-type',
+  message: { data: 'test-data' },
 }
 
 describe('AsyncOutboxConsumer', () => {
-  const defaultParams = {
-    getSql: () => createMockSql(),
-    publish: createPublish(),
-    consumerName: 'test-consumer',
-    checkInterval: Duration.ofSeconds(1),
-  }
-
-  beforeEach(() => {
-    jest.useFakeTimers()
-    jest.spyOn(global, 'setInterval')
-    jest.spyOn(global, 'clearInterval')
-  })
-
-  afterEach(() => {
-    jest.clearAllMocks()
-    jest.useRealTimers()
-  })
-
   describe('send', () => {
-    test('should insert message into asyncOutbox table', async () => {
-      const mockSql = createMockSql()
-      const consumer = new AsyncOutboxConsumer({
-        ...defaultParams,
-        getSql: () => mockSql as any,
-      })
+    test('inserts the message into the default partition', async () => {
+      const sql = createMockSql()
 
-      const message = {
-        messageId: 'test-id',
-        messageType: 'test-type',
-        message: { data: 'test-data' },
-      }
+      await createConsumer(() => sql).send(message)
 
-      await consumer.send(message)
-
-      expect((mockSql as any).unsafe).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO "asyncOutbox"'), [
-        defaultParams.consumerName,
+      expect(sql.unsafe).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO "asyncOutbox"'), [
+        'test-consumer',
+        'default',
         message.messageId,
         message.messageType,
         JSON.stringify(message.message),
       ])
     })
 
-    test('should throw error if consumer not started', async () => {
-      const consumer = new AsyncOutboxConsumer({
-        ...defaultParams,
-        getSql: () => undefined as any,
-      })
+    test('inserts the message into the given partition', async () => {
+      const sql = createMockSql()
 
-      await expect(
-        consumer.send({
-          messageId: 'test',
-          messageType: 'test',
-          message: {},
-        }),
-      ).rejects.toThrow('Database connection not established')
+      await createConsumer(() => sql).send(message, { partitionKey: 'tenant-1' })
+
+      expect(sql.unsafe).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining(['tenant-1']))
+    })
+
+    test('throws when there is no connection', async () => {
+      await expect(createConsumer(() => undefined).send(message)).rejects.toThrow('Database connection not established')
     })
   })
 
   describe('start/stop', () => {
-    test('should start polling when consumer is started', async () => {
-      const consumer = new AsyncOutboxConsumer(defaultParams as any)
+    test('cannot be started twice, and can be started again after stop', async () => {
+      const consumer = createConsumer(() => createMockSql())
+      const stop = consumer.start()
 
-      const result = consumer.start()
+      expect(() => consumer.start()).toThrow(/already started/)
 
-      expect(typeof result).toBe('function')
-      expect(setInterval).toHaveBeenCalledWith(expect.any(Function), defaultParams.checkInterval.ms)
-    })
-
-    test('should not start polling if already started', async () => {
-      const consumer = new AsyncOutboxConsumer(defaultParams as any)
-
-      consumer.start()
-      expect(() => consumer.start()).toThrow()
-      expect(setInterval).toHaveBeenCalledTimes(1)
-    })
-
-    test('should stop polling and close connection when stopped', async () => {
-      const mockSql = createMockSql()
-      const consumer = new AsyncOutboxConsumer({
-        ...defaultParams,
-        getSql: () => mockSql as any,
-      })
-
-      consumer.start()
+      await stop()
       await consumer.stop()
-
-      expect(clearInterval).toHaveBeenCalled()
-    })
-  })
-
-  describe('message processing', () => {
-    test('should process undelivered messages', async () => {
-      const mockSql = createMockSql()
-      const mockPublish = jest
-        .fn<(message: HermesAsyncMessageEnvelope<any> | HermesAsyncMessageEnvelope<any>[]) => Promise<void>>()
-        .mockResolvedValue(undefined)
-      const pendingMessages = [
-        {
-          position: 1,
-          messageId: 'msg1',
-          messageType: 'type1',
-          data: { value: 'test1' },
-          failsCount: 0,
-        },
-        {
-          position: 2,
-          messageId: 'msg2',
-          messageType: 'type2',
-          data: { value: 'test2' },
-          failsCount: 0,
-        },
-      ]
-
-      mockSql.mockImplementation(() => pendingMessages as any)
-
-      const consumer = new AsyncOutboxConsumer({
-        ...defaultParams,
-        getSql: () => mockSql as any,
-        publish: mockPublish,
-      })
-
-      consumer.start()
-      jest.advanceTimersByTime(defaultParams.checkInterval.ms)
-
-      // Wait for promises to resolve
-      await setTimeout(Duration.ofSeconds(1).ms)
-
-      expect(mockPublish).toHaveBeenCalledTimes(2)
-      expect(mockPublish).toHaveBeenCalledWith({
-        position: pendingMessages[0].position,
-        messageId: pendingMessages[0].messageId,
-        messageType: pendingMessages[0].messageType,
-        message: pendingMessages[0].data,
-        redeliveryCount: 0,
-      })
-    })
-
-    test('should handle failed message delivery', async () => {
-      const mockSql = createMockSql()
-      const mockPublish = jest.fn<() => Promise<Error>>().mockRejectedValue(new Error('Publish failed'))
-      const pendingMessage = {
-        position: 1,
-        messageId: 'msg1',
-        messageType: 'type1',
-        data: { value: 'test1' },
-        failsCount: 0,
-      }
-
-      mockSql.mockImplementation(() => [pendingMessage] as any)
-
-      const consumer = new AsyncOutboxConsumer({
-        ...defaultParams,
-        getSql: () => mockSql as any,
-        publish: mockPublish as any,
-      })
-
-      consumer.start()
-      jest.advanceTimersByTime(defaultParams.checkInterval.ms)
-
-      // Wait for promises to resolve
-      await setTimeout(Duration.ofSeconds(1).ms)
-
-      expect(mockSql as any).toHaveBeenCalledWith(
-        [expect.stringContaining('UPDATE "asyncOutbox"'), expect.any(String)] as any,
-        pendingMessage.position as any,
-      )
-    })
-
-    test('should not process messages if already processing', async () => {
-      const mockSql = createMockSql()
-      const mockPublish = jest.fn().mockImplementation(async () => {
-        // Simulate long-running publish
-        await setTimeout(Duration.ofSeconds(1).ms)
-      })
-
-      mockSql.mockImplementation(
-        () =>
-          [
-            {
-              position: 1,
-              messageId: 'msg1',
-              messageType: 'type1',
-              data: { value: 'test1' },
-              failsCount: 0,
-            },
-          ] as any,
-      )
-
-      const consumer = new AsyncOutboxConsumer({
-        ...defaultParams,
-        getSql: () => mockSql as any,
-        publish: mockPublish as any,
-      })
-
-      consumer.start()
-
-      // Trigger multiple intervals while the first processing is still running
-      jest.advanceTimersByTime(defaultParams.checkInterval.ms * 3)
-
-      await setTimeout(Duration.ofMiliseconds(500).ms)
-
-      // Should only start processing once
-      expect(mockPublish).toHaveBeenCalledTimes(1)
+      await consumer.start()()
     })
   })
 })

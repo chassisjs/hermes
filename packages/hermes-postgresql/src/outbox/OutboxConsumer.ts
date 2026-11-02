@@ -15,7 +15,7 @@ import {
   PublishOptions,
   Stop,
 } from '../common/types.js'
-import { insertRowsAtomically } from '../common/queryExecutor.js'
+import { insertRowsAtomically, isTransaction } from '../common/queryExecutor.js'
 import {
   createSerializedPublishingQueue,
   MessageToPublish,
@@ -98,8 +98,8 @@ import { OutboxConsumerState, OutboxConsumerStore } from './OutboxConsumerState.
 export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsumer<Message> {
   private _sql: HermesSql | null = null
   private _sendAsync:
-    ((message: MessageEnvelope<Message> | MessageEnvelope<Message>[], tx?: OutboxTransaction) => Promise<void>) | null =
-    null
+    | ((message: MessageEnvelope<Message> | MessageEnvelope<Message>[], options: PublishOptions) => Promise<void>)
+    | null = null
 
   /**
    * @internal
@@ -441,8 +441,8 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
       const asyncOutbox = this._params.asyncOutbox(this)
       asyncOutboxStop = asyncOutbox.start()
 
-      this._sendAsync = async (message, tx) => {
-        await asyncOutbox.send(message, { tx })
+      this._sendAsync = async (message, options) => {
+        await asyncOutbox.send(message, options)
       }
     }
 
@@ -662,7 +662,8 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
    * ```
    *
    * @param message - A single message or array of messages to send
-   * @param tx - Optional transaction to use: a postgres.js transaction or a {@link QueryExecutor}
+   * @param txOrOptions - Optional transaction to use (a postgres.js transaction or a {@link QueryExecutor}), or
+   * {@link PublishOptions} with the transaction and the partition of the messages (default: `'default'`)
    *
    * @returns Promise that resolves when message(s) are inserted into async outbox table
    *
@@ -776,11 +777,14 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
    * @see {@link useBasicAsyncOutboxConsumerPolicy} - How to enable async outbox
    * @see {@link ConsumerCreationParams.asyncOutbox} - Configuration option
    */
-  async send(message: MessageEnvelope<Message> | MessageEnvelope<Message>[], tx?: OutboxTransaction) {
+  async send(
+    message: MessageEnvelope<Message> | MessageEnvelope<Message>[],
+    txOrOptions?: OutboxTransaction | PublishOptions,
+  ) {
     if (this._sendAsync === null) {
       throw new Error(`AsyncOutbox hasn't been initialized.`)
     }
 
-    return await this._sendAsync(message, tx)
+    return await this._sendAsync(message, isTransaction(txOrOptions) ? { tx: txOrOptions } : (txOrOptions ?? {}))
   }
 }

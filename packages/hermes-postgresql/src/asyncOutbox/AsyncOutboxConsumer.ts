@@ -1,7 +1,16 @@
-import { Duration } from '@chassisjs/hermes'
+import {
+  createPollingOutbox,
+  Duration,
+  useExponentialRetryPolicy,
+  useNoOrderingPolicy,
+  usePartitionOrderingPolicy,
+  type PolledMessage,
+  type RetryPolicy,
+} from '@chassisjs/hermes'
 import { AsyncOrSync } from 'ts-essentials'
 import { insertRowsAtomically } from '../common/queryExecutor.js'
-import { HermesSql, JSONValue, MessageEnvelope, OutboxTransaction, Stop } from '../common/types.js'
+import { ErrorCallback, HermesSql, JSONValue, MessageEnvelope, OutboxTransaction, Stop } from '../common/types.js'
+import { createPollingStore } from './createPollingStore.js'
 
 /**
  * Envelope for messages in the async outbox with processing metadata.
@@ -12,6 +21,8 @@ import { HermesSql, JSONValue, MessageEnvelope, OutboxTransaction, Stop } from '
 type HermesAsyncMessageEnvelope<Message> = {
   /** Sequential position in the asyncOutbox table */
   position: number
+  /** The partition of the message */
+  partitionKey: string
   /** Unique message identifier */
   messageId: string
   /** Message type discriminator */
@@ -29,6 +40,8 @@ type HermesAsyncMessageEnvelope<Message> = {
 type PublishOptions = {
   /** Optional transaction for atomic operations */
   tx?: OutboxTransaction
+  /** The partition of the messages (default: `'default'`) */
+  partitionKey?: string
 }
 
 /**
@@ -63,6 +76,45 @@ type ConsumerCreationParams<Message> = {
   consumerName: string
 
   /**
+   * Publish only the messages of this partition. All the partitions of the consumer when not given.
+   */
+  partitionKey?: string
+
+  /**
+   * How the messages are ordered and shared between many instances of the application.
+   *
+   * - `'partition'`: the messages of a partition are published one by one, in the order they were stored, by one
+   *   instance at a time. A message that cannot be published stops its partition until it is published.
+   * - `'none'`: the messages are published in any order, many instances share the messages of one partition, and a
+   *   message that cannot be published does not stop other messages.
+   *
+   * @defaultValue `'partition'`
+   */
+  ordering?: 'partition' | 'none'
+
+  /**
+   * The maximum number of messages of a partition published per poll.
+   *
+   * @defaultValue `100`
+   */
+  batchSize?: number
+
+  /**
+   * How long a claim of a partition (or of a message) lasts. Another instance takes over the messages of an instance
+   * that died after this time.
+   *
+   * @defaultValue `Duration.ofSeconds(30)`
+   */
+  lease?: Duration
+
+  /**
+   * How long to wait before publishing a failed message again.
+   *
+   * @defaultValue `useExponentialRetryPolicy({ initial: waitAfterFailedPublish })`
+   */
+  retry?: RetryPolicy
+
+  /**
    * Interval for polling the asyncOutbox table for new messages.
    *
    * The next polling cycle starts after the previous one completes.
@@ -72,18 +124,12 @@ type ConsumerCreationParams<Message> = {
   checkInterval?: Duration
 
   /**
-   * Duration to wait after a failed publish attempt before retrying.
+   * Duration to wait after the first failed publish attempt before retrying. The wait doubles after every next attempt,
+   * up to 1 minute. Ignored when `retry` is given.
    *
    * @defaultValue `Duration.ofSeconds(1)`
    */
   waitAfterFailedPublish?: Duration
-
-  /**
-   * Whether to automatically stop on SIGTERM/SIGINT signals.
-   *
-   * @defaultValue `true`
-   */
-  shouldDisposeOnSigterm?: boolean
 
   /**
    * Callback invoked when publishing fails.
@@ -178,9 +224,7 @@ class AsyncOutboxConsumer<Message extends JSONValue> implements IAsyncOutboxCons
   private readonly _checkInterval: Duration
   private readonly _getSql: () => HermesSql
 
-  private _started = false
-  private _isProcessing = false
-  private _intervalId: NodeJS.Timeout | null = null
+  private _stop: (() => Promise<void>) | null = null
 
   /**
    * @internal
@@ -233,21 +277,35 @@ class AsyncOutboxConsumer<Message extends JSONValue> implements IAsyncOutboxCons
     }
 
     const messages = Array.isArray(message) ? message : [message]
+    const partitionKey = options?.partitionKey || 'default'
 
     await insertRowsAtomically(
       this._getSql(),
       options?.tx,
       'asyncOutbox',
-      [{ name: 'consumerName' }, { name: 'messageId' }, { name: 'messageType' }, { name: 'data', cast: 'text::jsonb' }],
-      messages.map((m) => [this._params.consumerName, m.messageId, m.messageType, JSON.stringify(m.message)]),
+      [
+        { name: 'consumerName' },
+        { name: 'partitionKey' },
+        { name: 'messageId' },
+        { name: 'messageType' },
+        { name: 'data', cast: 'text::jsonb' },
+      ],
+      messages.map((m) => [
+        this._params.consumerName,
+        partitionKey,
+        m.messageId,
+        m.messageType,
+        JSON.stringify(m.message),
+      ]),
     )
   }
 
   /**
    * Starts the async outbox consumer polling loop.
    *
-   * Begins polling the `asyncOutbox` table at the configured interval
-   * for undelivered messages.
+   * Begins polling the `asyncOutbox` table at the configured interval for undelivered messages. It does not keep a
+   * position like "the last published position", so a message is not skipped when its transaction commits after a
+   * transaction with a greater position.
    *
    * @returns Stop function for graceful shutdown
    *
@@ -270,21 +328,34 @@ class AsyncOutboxConsumer<Message extends JSONValue> implements IAsyncOutboxCons
    * ```
    */
   start() {
-    if (this._started) {
+    if (this._stop) {
       throw new Error(`AsyncOutboxConsumer is already started`)
     }
 
-    this._started = true
-    this._startPolling()
+    const { consumerName, partitionKey, ordering, batchSize, lease } = this._params
+    const store = createPollingStore<Message>(this._getSql, { consumerName, partitionKey })
 
-    return (() => Promise.resolve(stop())) as Stop
+    this._stop = createPollingOutbox<Message>({
+      policy: ordering === 'none' ? useNoOrderingPolicy(store) : usePartitionOrderingPolicy(store),
+      publish: async (message) => {
+        await this._params.publish(toEnvelope(message))
+      },
+      pollInterval: this._checkInterval,
+      batchSize,
+      lease,
+      retry: this._params.retry ?? useExponentialRetryPolicy({ initial: this._params.waitAfterFailedPublish }),
+      onFailedPublish: this._params.onFailedPublish,
+      onDbError: this._params.onDbError,
+    }).start()
+
+    return (() => this.stop()) as Stop
   }
 
   /**
    * Stops the async outbox consumer.
    *
-   * Stops polling and waits for the current processing cycle to complete.
-   * Does not wait for in-flight message handlers to finish.
+   * Stops polling, waits for the message being published and releases the claims, so that other instances can take
+   * over the partitions at once.
    *
    * @example
    * ```typescript
@@ -293,67 +364,21 @@ class AsyncOutboxConsumer<Message extends JSONValue> implements IAsyncOutboxCons
    * ```
    */
   async stop(): Promise<void> {
-    if (this._intervalId) {
-      clearInterval(this._intervalId)
-      this._intervalId = null
-    }
+    const stop = this._stop
 
-    this._started = false
-  }
-
-  private _startPolling(): void {
-    this._intervalId = setInterval(async () => {
-      try {
-        await this._processUndeliveredMessages()
-      } catch (error) {
-        // console.error('Error processing undelivered messages:', error)
-      }
-    }, this._checkInterval.ms)
-  }
-
-  private async _processUndeliveredMessages(): Promise<void> {
-    if (this._isProcessing) {
-      return
-    }
-
-    this._isProcessing = true
-    try {
-      const pendingMessages = await this._getSql()`
-        SELECT * FROM "asyncOutbox"
-        WHERE delivered = false
-        ORDER BY "addedAt" ASC
-        LIMIT 10
-      `
-
-      for (const message of pendingMessages) {
-        try {
-          await this._params.publish({
-            position: message.position,
-            messageId: message.messageId,
-            messageType: message.messageType,
-            message: message.data,
-            redeliveryCount: message.failsCount || 0,
-          })
-
-          await this._getSql()`
-            UPDATE "asyncOutbox"
-            SET "delivered" = true,
-                "sentAt" = NOW()
-            WHERE "position" = ${message.position}
-          `
-        } catch (error) {
-          await this._getSql()`
-            UPDATE "asyncOutbox"
-            SET "failsCount" = COALESCE("failsCount", 0) + 1
-            WHERE "position" = ${message.position}
-          `
-        }
-      }
-    } finally {
-      this._isProcessing = false
-    }
+    this._stop = null
+    await stop?.()
   }
 }
+
+const toEnvelope = <Message>(message: PolledMessage<Message>): HermesAsyncMessageEnvelope<Message> => ({
+  position: Number(message.id),
+  partitionKey: message.partitionKey,
+  messageId: message.messageId,
+  messageType: message.messageType,
+  redeliveryCount: message.attempts,
+  message: message.message,
+})
 
 const createAsyncOutboxConsumer = <Message extends JSONValue>(params: ConsumerCreationParams<Message>) =>
   new AsyncOutboxConsumer<Message>(params)

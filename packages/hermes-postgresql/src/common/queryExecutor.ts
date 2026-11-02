@@ -4,6 +4,9 @@ import type { OutboxTransaction, QueryExecutor } from './types.js'
 const isPostgresJs = (sql: Sql | OutboxTransaction): sql is Sql | TransactionSql =>
   typeof sql === 'function' && typeof (sql as Partial<Sql>).unsafe === 'function'
 
+const isTransaction = (value: OutboxTransaction | object | undefined): value is OutboxTransaction =>
+  typeof value === 'function' || typeof (value as Partial<QueryExecutor> | undefined)?.query === 'function'
+
 const toQueryExecutor = (sql: Sql | OutboxTransaction): QueryExecutor =>
   isPostgresJs(sql) ? { query: (text, params) => sql.unsafe(text, params as never[]) } : sql
 
@@ -51,4 +54,4 @@ const _insertStatement = async (executor: QueryExecutor, table: string, columns:
   await executor.query(`INSERT INTO "${table}" (${columnList}) VALUES ${placeholders}`, rows.flat())
 }
 
-export { insertRows, insertRowsAtomically, MaxRowsPerStatement, toQueryExecutor }
+export { insertRows, insertRowsAtomically, isTransaction, MaxRowsPerStatement, toQueryExecutor }

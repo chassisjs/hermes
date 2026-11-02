@@ -62,7 +62,7 @@ Things to keep in mind:
 
 - **Every slot decodes all the messages.** There is one publication for the whole `outbox` table, so PostgreSQL decodes and streams every message to every slot, and each consumer skips the messages of other tenants. With N tenants, PostgreSQL does the decoding work N times. Filtering on the server side is in the [backlog](https://github.com/chassisjs/hermes/blob/main/docs/BACKLOG.md#filter-partitions-on-the-server-side-postgresql).
 - **The slowest slot holds the WAL.** A tenant whose consumer is stopped, or cannot publish, keeps the WAL on the disk until it moves again. Watch the replication lag of every slot (`pg_replication_slots`) and the free disk space.
-- **Do not combine it with the async outbox.** The async outbox (`outbox.send()`) does not separate partitions yet, so the consumers of all tenants would publish the same messages. See the [backlog](https://github.com/chassisjs/hermes/blob/main/docs/BACKLOG.md#async-outbox-ignores-consumers-and-partitions-postgresql).
+- **The async outbox is per partition too.** The async outbox of a consumer (`outbox.send()`) publishes only the messages of its partition, so pass the tenant to `send()` as well: `outbox.send(message, { tx, partitionKey: 'tenant-1' })`. See [Polling outbox](./polling-outbox.md).
 
 ### Removing a tenant
 

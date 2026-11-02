@@ -1,5 +1,6 @@
 import { Duration, literalObject } from '@chassisjs/hermes'
 import {
+  type ConsumerCreationParams as AsyncOutboxConsumerCreationParams,
   createAsyncOutboxConsumer,
   HermesAsyncMessageEnvelope,
   IAsyncOutboxConsumer,
@@ -60,7 +61,12 @@ type UseAsyncOutboxPolicy<Message extends JSONValue> = (
  * - **Lower priority** - Doesn't compete with critical message processing
  * - **Flexible timing** - Poll interval can be adjusted
  *
+ * The async outbox of a consumer publishes only the messages of the consumer's partition, so pass the same
+ * `partitionKey` to `send()` as to the consumer. It does not keep a position like "the last published position", so a
+ * message is not skipped when its transaction commits after a transaction with a greater position.
+ *
  * @param checkInterval - How often to poll for new messages (default: 15 seconds)
+ * @param options - How the messages are ordered (`ordering`, default `'partition'`), claimed and retried
  *
  * @returns A policy function that creates an async outbox consumer
  *
@@ -136,17 +142,27 @@ type UseAsyncOutboxPolicy<Message extends JSONValue> = (
  * @see {@link AsyncOutboxConsumer} for implementation details
  */
 const useBasicAsyncOutboxConsumerPolicy =
-  (checkInterval = Duration.ofSeconds(15)) =>
+  (checkInterval = Duration.ofSeconds(15), options?: AsyncOutboxPolicyOptions) =>
   <Message extends JSONValue>(hermes: OutboxConsumer<Message>) => {
     const params = hermes.getCreationParams()
 
     return createAsyncOutboxConsumer<Message>({
+      ...options,
       consumerName: params.consumerName,
+      partitionKey: params.partitionKey || 'default',
       getSql: () => hermes.getDbConnection(),
       publish: (message) => params.publish(toHermesEnvelope<Message>(message)),
       checkInterval,
     })
   }
+
+/**
+ * Options of the async outbox created by {@link useBasicAsyncOutboxConsumerPolicy}.
+ */
+type AsyncOutboxPolicyOptions = Pick<
+  AsyncOutboxConsumerCreationParams<JSONValue>,
+  'ordering' | 'batchSize' | 'lease' | 'retry' | 'waitAfterFailedPublish' | 'onFailedPublish' | 'onDbError'
+>
 
 /**
  * @internal
@@ -165,4 +181,4 @@ const toHermesEnvelope = <Message extends JSONValue>(
   }
 }
 
-export { useBasicAsyncOutboxConsumerPolicy, type UseAsyncOutboxPolicy }
+export { useBasicAsyncOutboxConsumerPolicy, type AsyncOutboxPolicyOptions, type UseAsyncOutboxPolicy }

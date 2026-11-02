@@ -80,7 +80,7 @@ Hermes talks to PostgreSQL with [Postgres.js](https://github.com/porsager/postgr
 - a Postgres.js transaction, as in the example above,
 - any object with a `query(text, params)` method that runs SQL with positional parameters (`$1`, `$2`, ...) in your transaction.
 
-The same works for `send()` of the async outbox: `await hermes.send(message, tx)`.
+The same works for `send()` of the async outbox: `await hermes.send(message, tx)`, or `await hermes.send(message, { tx, partitionKey })`. See [Polling outbox](/pages/polling-outbox.md).
 
 ### node-postgres (`pg`)
 

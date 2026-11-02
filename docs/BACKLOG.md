@@ -14,27 +14,6 @@ The `partitionKey` columns (`outbox`, `outboxConsumer`, `asyncOutbox`, `asyncOut
 
 Two instances of one partition both publish the same messages and overwrite each other's position. A claim with a lease in `__outboxConsumers` (like `asyncOutboxPartition` in PostgreSQL) would let only one of them publish. The position is also stored per `partitionKey` only, so two services that use one database and one partition key share it; add a consumer name.
 
-## Async outbox ignores consumers and partitions (PostgreSQL)
-
-**Type:** bug · **Package:** `@chassisjs/hermes-postgresql`
-
-The async outbox (`outbox.send()`, `useBasicAsyncOutboxConsumerPolicy`) does not separate consumers nor partitions:
-
-- The `asyncOutbox` table has no `partitionKey` column (`packages/hermes-postgresql/src/outbox/migrate.ts:55`).
-- `send()` stores the `consumerName`, but polling reads every undelivered message, whatever its consumer: `SELECT * FROM "asyncOutbox" WHERE delivered = false ORDER BY "addedAt" LIMIT 10` (`packages/hermes-postgresql/src/asyncOutbox/AsyncOutboxConsumer.ts:347`).
-- Polling does not lock the rows it reads.
-
-**Impact:** Two async outbox consumers running at the same time publish the same messages, and a consumer publishes messages queued for another one. This happens e.g. with one consumer per partition, each with `useBasicAsyncOutboxConsumerPolicy()`.
-
-**Proposed fix:**
-
-1. Add a `partitionKey` column to `asyncOutbox` (default `'default'`) and fill it in `send()`.
-2. Filter the polling by `consumerName` and `partitionKey`.
-3. Claim the rows so that concurrent instances do not take the same messages, e.g. `SELECT ... FOR UPDATE SKIP LOCKED` in a transaction, or a `claimedAt`/`claimedBy` column with a lease timeout.
-4. Add an index on (`consumerName`, `partitionKey`, `delivered`, `addedAt`).
-
-The schema change needs a migration for existing installations (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`).
-
 ## Filter partitions on the server side (PostgreSQL)
 
 **Type:** improvement · **Package:** `@chassisjs/hermes-postgresql`
