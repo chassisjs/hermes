@@ -30,14 +30,18 @@ type PolledMessage<Message> = {
  */
 type PollingOutboxBaseStore<Message> = {
   /**
-   * Marks the message as delivered and releases its claim.
+   * Marks the message as delivered and releases its claim. It is called after the message was published, so it marks
+   * the message even when the claim of `owner` has expired, as long as the message is not delivered yet.
    */
   markDelivered(message: PolledMessage<Message>): Promise<void>
 
   /**
    * Increments the attempts of the message, releases its claim and hides it until `retryAfter` passes.
+   *
+   * Change only a message that is not delivered and not claimed by another instance: when the claim of `owner` has
+   * expired and another instance claimed the message, it must keep its claim.
    */
-  markFailed(message: PolledMessage<Message>, params: { retryAfter: Duration }): Promise<void>
+  markFailed(message: PolledMessage<Message>, params: { retryAfter: Duration; owner: string }): Promise<void>
 }
 
 /**
@@ -90,9 +94,9 @@ type PartitionClaimingStore<Message> = PollingOutboxBaseStore<Message> & {
   renewPartitions(params: { owner: string; lease: Duration; partitionKeys: string[] }): Promise<void>
 
   /**
-   * Releases the partitions claimed by `owner`, so that other instances can take them at once.
+   * Releases all the partitions claimed by `owner`, so that other instances can take them at once.
    */
-  releasePartitions(params: { owner: string; partitionKeys: string[] }): Promise<void>
+  releasePartitions(params: { owner: string }): Promise<void>
 }
 
 /**

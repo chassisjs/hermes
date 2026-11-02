@@ -32,7 +32,6 @@ const usePartitionOrderingPolicy = <Message>(
   options?: { maxPartitions?: number },
 ): PollingPolicy<Message> => {
   const maxPartitions = options?.maxPartitions ?? 10
-  const claimed = new Set<string>()
   const partitionsOf = (lanes: PollingLane<Message>[]) => [
     ...new Set(lanes.flatMap((lane) => lane.messages.map(({ partitionKey }) => partitionKey))),
   ]
@@ -45,8 +44,6 @@ const usePartitionOrderingPolicy = <Message>(
 
     async claim({ owner, lease, limit }) {
       const partitionKeys = await store.claimPartitions({ owner, lease, limit: maxPartitions })
-
-      partitionKeys.forEach((partitionKey) => claimed.add(partitionKey))
 
       const lanes = await Promise.all(
         partitionKeys.map(async (partitionKey) => ({
@@ -67,13 +64,7 @@ const usePartitionOrderingPolicy = <Message>(
     },
 
     async release({ owner }) {
-      const partitionKeys = [...claimed]
-
-      claimed.clear()
-
-      if (partitionKeys.length) {
-        await store.releasePartitions({ owner, partitionKeys })
-      }
+      await store.releasePartitions({ owner })
     },
   }
 }

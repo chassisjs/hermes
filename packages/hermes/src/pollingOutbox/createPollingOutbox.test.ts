@@ -32,8 +32,13 @@ const createInMemoryStore = () => {
     async markDelivered(message) {
       Object.assign(rowOf(message), { delivered: true, claimedBy: null, claimedUntil: 0 })
     },
-    async markFailed(message, { retryAfter }) {
+    async markFailed(message, { retryAfter, owner }) {
       const row = rowOf(message)
+
+      if (row.delivered || (row.claimedBy !== null && row.claimedBy !== owner)) {
+        return
+      }
+
       Object.assign(row, {
         attempts: row.attempts + 1,
         nextAttemptAt: Date.now() + retryAfter.ms,
@@ -91,10 +96,12 @@ const createInMemoryStore = () => {
         .filter((partition) => partition?.claimedBy === owner)
         .forEach((partition) => (partition!.claimedUntil = Date.now() + lease.ms))
     },
-    async releasePartitions({ owner, partitionKeys }) {
-      partitionKeys
-        .filter((key) => partitions.get(key)?.claimedBy === owner)
-        .forEach((key) => partitions.set(key, { claimedBy: null, claimedUntil: 0 }))
+    async releasePartitions({ owner }) {
+      partitions.forEach((partition) => {
+        if (partition.claimedBy === owner) {
+          Object.assign(partition, { claimedBy: null, claimedUntil: 0 })
+        }
+      })
     },
   }
   const add = (id: number, partitionKey = 'default') =>
@@ -312,6 +319,36 @@ describe('createPollingOutbox with usePartitionOrderingPolicy', () => {
 })
 
 describe('createPollingOutbox with useNoOrderingPolicy', () => {
+  test('a failure reported after the claim expired keeps the claim of another instance', async () => {
+    const { store, add, rows } = createInMemoryStore()
+    let release = () => {}
+
+    add(1)
+
+    const stop = createPollingOutbox({
+      ...fast,
+      owner: 'slow',
+      lease: Duration.ofMiliseconds(30),
+      policy: useNoOrderingPolicy({ ...store, renewMessages: async () => {} }),
+      publish: () =>
+        new Promise<void>((_, reject) => {
+          release = () => reject(new Error('broker is down'))
+        }),
+    }).start()
+
+    await waitUntil(() => rows[0].claimedBy === 'slow')
+    await setTimeout(60)
+
+    const [message] = await store.claimMessages({ owner: 'other', lease: Duration.ofSeconds(30), limit: 1 })
+
+    expect(message.id).toBe(1)
+
+    release()
+    await stop()
+
+    expect(rows[0]).toEqual(expect.objectContaining({ claimedBy: 'other', attempts: 0 }))
+  })
+
   test('a failed message does not stop other messages', async () => {
     const { store, add } = createInMemoryStore()
     const published: number[] = []

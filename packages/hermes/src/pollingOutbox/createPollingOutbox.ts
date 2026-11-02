@@ -67,7 +67,7 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
           await policy.markDelivered(message)
         } else {
           onFailedPublish(error, message)
-          await policy.markFailed(message, { retryAfter: retry(message.attempts + 1) })
+          await policy.markFailed(message, { retryAfter: retry(message.attempts + 1), owner })
         }
       } catch (dbError) {
         onDbError(dbError)
