@@ -17,5 +17,21 @@ export {
   type WithoutFlavour,
 } from './core/typing/index.js'
 export { Duration } from './duration.js'
+export {
+  createPollingOutbox,
+  useExponentialRetryPolicy,
+  useNoOrderingPolicy,
+  usePartitionOrderingPolicy,
+  type MessageClaimingStore,
+  type PartitionClaimingStore,
+  type PolledMessage,
+  type PollingLane,
+  type PollingOutbox,
+  type PollingOutboxBaseStore,
+  type PollingOutboxParams,
+  type PollingPolicy,
+  type PollingPublish,
+  type RetryPolicy,
+} from './pollingOutbox/index.js'
 export { addDisposeOnSigterm, assert, isNil, noop, parseSemVer, swallow } from './utils/index.js'
 export { type PositiveInteger, type PositiveNumber } from './value-objects.js'
