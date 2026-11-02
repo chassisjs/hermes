@@ -2,6 +2,18 @@
 
 Known issues and improvements that are not scheduled yet.
 
+## The `partitionKey` column is too short for UUIDs (PostgreSQL)
+
+**Type:** improvement · **Package:** `@chassisjs/hermes-postgresql`
+
+The `partitionKey` columns (`outbox`, `outboxConsumer`, `asyncOutbox`, `asyncOutboxPartition`) and `consumerName` are `VARCHAR(30)` (`packages/hermes-postgresql/src/outbox/migrate.ts`), so a UUID (36 characters) does not fit. Widen them (e.g. to `VARCHAR(250)`) with `ALTER TABLE ... ALTER COLUMN ... TYPE`, which in PostgreSQL does not rewrite the table when only the length grows. Check that the `outbox` table, which is in the publication, keeps streaming after the change.
+
+## No lock against a second instance of a partition (MongoDB)
+
+**Type:** improvement · **Package:** `@chassisjs/hermes-mongodb`
+
+Two instances of one partition both publish the same messages and overwrite each other's position. A claim with a lease in `__outboxConsumers` (like `asyncOutboxPartition` in PostgreSQL) would let only one of them publish. The position is also stored per `partitionKey` only, so two services that use one database and one partition key share it; add a consumer name.
+
 ## Async outbox ignores consumers and partitions (PostgreSQL)
 
 **Type:** bug · **Package:** `@chassisjs/hermes-postgresql`

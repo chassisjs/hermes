@@ -197,7 +197,7 @@ await outbox1.start()
 await outbox2.start()
 ```
 
-Each partition is processed independently, allowing you to scale based on your needs.
+Each partition is processed independently, allowing you to scale based on your needs. See [Multi-tenancy](/pages/multi-tenancy.md) for running one partition per tenant.
 
 ### Collections
 
