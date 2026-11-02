@@ -197,7 +197,10 @@ type OutboxTransaction = TransactionSql | QueryExecutor
  * ```
  */
 type PublishOptions = {
-  /** Optional partition key for horizontal scaling. Messages with the same partition key are processed by the same consumer. */
+  /**
+   * Optional partition key for horizontal scaling. Messages with the same partition key are processed by the same
+   * consumer. Defaults to the `partitionKey` of the consumer, or `'default'`.
+   */
   partitionKey?: string
   /** Optional transaction to include the message in. When provided, the message is only committed if the transaction succeeds. */
   tx?: OutboxTransaction

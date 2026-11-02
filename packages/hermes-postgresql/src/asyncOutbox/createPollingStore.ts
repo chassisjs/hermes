@@ -33,6 +33,13 @@ type PollingStoreScope = {
  * without undelivered messages are removed from `asyncOutboxPartition`; the next poll adds them again when they get
  * new messages, so a message that commits during the removal is not lost.
  *
+ * Earlier versions did not store the partition of a message. The first claim takes over the undelivered messages
+ * without a partition of the consumer and puts them in the partition of the store (or `'default'`), so they are
+ * published by the first consumer of the same name that starts, as earlier versions did.
+ *
+ * `markFailed` changes a message only when `owner` still has the claim of the message, or of its partition when the
+ * message itself is not claimed (`usePartitionOrderingPolicy`).
+ *
  * @param getSql - Returns the connection to the database
  * @param scope - The consumer and, optionally, the partition whose messages the store reads
  */
@@ -63,6 +70,20 @@ const createPollingStore = <Message>(
       : sql`${sql(table)}."consumerName" = ${consumerName} AND ${sql(table)}."partitionKey" = ${partitionKey}`
   }
 
+  let isLegacyAdopted = false
+  const adoptLegacyMessages = async () => {
+    if (isLegacyAdopted) {
+      return
+    }
+
+    await getSql()`
+      UPDATE "asyncOutbox"
+      SET "partitionKey" = ${partitionKey ?? 'default'}
+      WHERE "consumerName" = ${consumerName} AND "partitionKey" IS NULL AND "delivered" = false
+    `
+    isLegacyAdopted = true
+  }
+
   return {
     async markDelivered(message) {
       await getSql()`
@@ -81,11 +102,24 @@ const createPollingStore = <Message>(
             "claimedUntil" = NULL
         WHERE "position" = ${message.id.toString()}
           AND "delivered" = false
-          AND ("claimedBy" IS NULL OR "claimedBy" = ${owner})
+          AND (
+            "claimedBy" = ${owner}
+            OR (
+              "claimedBy" IS NULL
+              AND EXISTS (
+                SELECT 1 FROM "asyncOutboxPartition" p
+                WHERE p."consumerName" = "asyncOutbox"."consumerName"
+                  AND p."partitionKey" = "asyncOutbox"."partitionKey"
+                  AND p."claimedBy" = ${owner}
+              )
+            )
+          )
       `
     },
 
     async claimMessages({ owner, lease, limit }) {
+      await adoptLegacyMessages()
+
       const rows = await getSql()<AsyncOutboxRow<Message>[]>`
         UPDATE "asyncOutbox"
         SET "claimedBy" = ${owner}, "claimedUntil" = ${after(lease)}
@@ -127,6 +161,8 @@ const createPollingStore = <Message>(
 
     async claimPartitions({ owner, lease, limit }) {
       const sql = getSql()
+
+      await adoptLegacyMessages()
 
       await sql`
         WITH RECURSIVE "pending" AS (

@@ -488,7 +488,8 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
    * @param message - A single message or array of messages to queue
    * @param options - Optional configuration
    * @param options.tx - Transaction to store the messages in (recommended for consistency): a postgres.js transaction or a {@link QueryExecutor}
-   * @param options.partitionKey - Partition key for horizontal scaling (default: 'default')
+   * @param options.partitionKey - Partition key for horizontal scaling (default: the `partitionKey` of the consumer,
+   * or `'default'`)
    *
    * @returns Promise that resolves when message(s) are committed to outbox table
    *
@@ -606,7 +607,7 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
   async queue(message: MessageEnvelope<Message> | MessageEnvelope<Message>[], options?: PublishOptions): Promise<void> {
     assert(this._sql)
 
-    const partitionKey = options?.partitionKey || 'default'
+    const partitionKey = options?.partitionKey || this._params.partitionKey || 'default'
     const messages = Array.isArray(message) ? message : [message]
 
     await insertRowsAtomically(

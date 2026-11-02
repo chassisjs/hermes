@@ -284,15 +284,24 @@ describe('Async outbox', () => {
 
       await migrate(sql, 'hermes_slot_app_default')
 
-      const stop = createAsyncOutbox(sql, (messageId) => {
-        published.push(messageId)
+      const stop = createAsyncOutboxConsumer<MedicineEvent>({
+        getSql: () => sql as never,
+        consumerName: 'app',
+        partitionKey: 'tenant-a',
+        checkInterval,
+        publish: async (messages) => {
+          for (const { messageId } of Array.isArray(messages) ? messages : [messages]) {
+            published.push(messageId)
+          }
+        },
       }).start()
 
       await waitUntil(() => published.length === 1)
       await stop()
 
+      // earlier versions did not store the partition, so the first consumer of the same name takes the message over
       expect(published).toEqual(['old'])
-      expect(await sql`SELECT "partitionKey" FROM "asyncOutbox"`).toEqual([{ partitionKey: 'default' }])
+      expect(await sql`SELECT "partitionKey" FROM "asyncOutbox"`).toEqual([{ partitionKey: 'tenant-a' }])
     })
   })
 
@@ -387,6 +396,59 @@ describe('Async outbox', () => {
       await store.releasePartitions({ owner: 'first' })
 
       expect(await sql`SELECT "claimedBy" FROM "asyncOutboxPartition" WHERE "claimedBy" IS NOT NULL`).toEqual([])
+    })
+  })
+
+  test('with partition ordering, a failure reported by an instance that lost the partition is ignored', async () => {
+    await postgres(async (sql) => {
+      await migrate(sql, 'hermes_slot_app_default')
+
+      const store = createPollingStore<MedicineEvent>(() => sql as never, { consumerName: 'app' })
+
+      await createAsyncOutbox(sql, () => {}).send(envelope('m1'))
+
+      expect(await store.claimPartitions({ owner: 'second', lease: Duration.ofSeconds(30), limit: 10 })).toEqual([
+        'default',
+      ])
+
+      const [message] = await store.readPartition({ partitionKey: 'default', limit: 1 })
+
+      await store.markFailed(message, { retryAfter: Duration.ofSeconds(1), owner: 'first' })
+
+      expect(await sql`SELECT "failsCount", "nextAttemptAt" FROM "asyncOutbox"`).toEqual([
+        { failsCount: 0, nextAttemptAt: null },
+      ])
+
+      await store.markFailed(message, { retryAfter: Duration.ofSeconds(1), owner: 'second' })
+
+      expect(await sql`SELECT "failsCount" FROM "asyncOutbox"`).toEqual([{ failsCount: 1 }])
+    })
+  })
+
+  test('queue() and send() store the messages in the partition of the consumer by default', async () => {
+    await postgres(async (sql, container) => {
+      const published: string[] = []
+      const outbox = createOutboxConsumer<MedicineEvent>({
+        getOptions: () => getOptions(container),
+        publish: async (messages: HermesMessageEnvelope<MedicineEvent> | HermesMessageEnvelope<MedicineEvent>[]) => {
+          for (const { messageId } of Array.isArray(messages) ? messages : [messages]) {
+            published.push(messageId)
+          }
+        },
+        consumerName: 'app',
+        partitionKey: 'tenant-1',
+        asyncOutbox: useBasicAsyncOutboxConsumerPolicy(checkInterval),
+      })
+      const stop = await outbox.start()
+
+      await outbox.queue(envelope('queued'))
+      await outbox.send(envelope('sent'))
+
+      await waitUntil(() => published.length === 2)
+      await stop()
+
+      expect([...published].sort()).toEqual(['queued', 'sent'])
+      expect(await sql`SELECT "partitionKey" FROM "outbox"`).toEqual([{ partitionKey: 'tenant-1' }])
     })
   })
 })

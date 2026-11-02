@@ -76,7 +76,7 @@ The async outbox of a consumer publishes only the messages of the consumer's `co
 
 `send(message, tx)` still works: the second parameter is either a transaction or `{ tx, partitionKey }`.
 
-Hermes adds the columns `partitionKey`, `nextAttemptAt`, `claimedBy` and `claimedUntil` to the `asyncOutbox` table, and the `asyncOutboxPartition` table with the claims of the partitions, when the consumer starts. The messages stored by earlier versions go to the `'default'` partition, because earlier versions did not store the partition. So when your consumers have other partition keys, let them publish all the messages of the async outbox before you upgrade (`SELECT COUNT(*) FROM "asyncOutbox" WHERE "delivered" = false`), or move the undelivered messages to the right partition yourself.
+Hermes adds the columns `partitionKey`, `nextAttemptAt`, `claimedBy` and `claimedUntil` to the `asyncOutbox` table, and the `asyncOutboxPartition` table with the claims of the partitions, when the consumer starts. Earlier versions did not store the partition of a message, and any consumer published any message. So the first consumer of the same `consumerName` that starts after the upgrade takes over the undelivered messages stored by earlier versions and puts them in its partition.
 
 ## Your own store
 
