@@ -70,3 +70,78 @@ await sql.begin(async (sql) => {
   await hermes.queue(patientRegisteredEvent, { tx: sql })
 })
 ```
+
+## Using the transactions of your database library
+
+_Available since `1.0.0-alpha.19`._
+
+Hermes talks to PostgreSQL with [Postgres.js](https://github.com/porsager/postgres) on its own connections. Your app can use any other library. To store messages atomically with your data, pass your library's transaction as `tx`. Hermes accepts:
+
+- a Postgres.js transaction, as in the example above,
+- any object with a `query(text, params)` method that runs SQL with positional parameters (`$1`, `$2`, ...) in your transaction.
+
+The same works for `send()` of the async outbox: `await hermes.send(message, tx)`.
+
+### node-postgres (`pg`)
+
+A `pg` client already has a matching `query` method, so pass it as it is:
+
+```typescript
+const client = await pool.connect()
+
+try {
+  await client.query('BEGIN')
+  await client.query(`insert into users (name, surname) values ($1, $2)`, ['Max', 'Payne'])
+  await hermes.queue(patientRegisteredEvent, { tx: client })
+  await client.query('COMMIT')
+} catch (error) {
+  await client.query('ROLLBACK')
+  throw error
+} finally {
+  client.release()
+}
+```
+
+The `QueryRunner` of TypeORM also has a matching `query` method.
+
+### Kysely
+
+```typescript
+import { CompiledQuery } from 'kysely'
+
+await db.transaction().execute(async (trx) => {
+  await trx.insertInto('users').values({ name: 'Max', surname: 'Payne' }).execute()
+  await hermes.queue(patientRegisteredEvent, {
+    tx: { query: (text, params) => trx.executeQuery(CompiledQuery.raw(text, params)) },
+  })
+})
+```
+
+### Drizzle
+
+```typescript
+import { sql } from 'drizzle-orm'
+
+const toDrizzleSql = (text: string, params: unknown[]) =>
+  sql.join(text.split(/\$(\d+)/).map((part, i) => (i % 2 === 0 ? sql.raw(part) : sql`${params[Number(part) - 1]}`)))
+
+await db.transaction(async (tx) => {
+  await tx.insert(users).values({ name: 'Max', surname: 'Payne' })
+  await hermes.queue(patientRegisteredEvent, {
+    tx: { query: (text, params) => tx.execute(toDrizzleSql(text, params)) },
+  })
+})
+```
+
+### Prisma
+
+```typescript
+await prisma.$transaction(async (tx) => {
+  await tx.user.create({ data: { name: 'Max', surname: 'Payne' } })
+  await hermes.queue(patientRegisteredEvent, {
+    tx: { query: (text, params) => tx.$executeRawUnsafe(text, ...params) },
+  })
+})
+```
+
+When you queue many messages at once (`hermes.queue([message1, message2], { tx })`), Hermes stores them all or none, also without `tx`.

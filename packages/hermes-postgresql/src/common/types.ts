@@ -138,6 +138,35 @@ type Start = () => Promise<Stop>
 type Stop = () => Promise<void>
 
 /**
+ * Runs a SQL query with positional parameters (`$1`, `$2`, ...).
+ *
+ * Wrap the transaction of the library your app uses, so that Hermes stores messages in it.
+ * `pg` clients (`PoolClient`, `Client`) and TypeORM's `QueryRunner` satisfy it as they are.
+ *
+ * @example
+ * ```typescript
+ * // node-postgres
+ * const client = await pool.connect()
+ * await client.query('BEGIN')
+ * await outbox.queue(event, { tx: client })
+ * await client.query('COMMIT')
+ *
+ * // Prisma
+ * await prisma.$transaction(async (tx) => {
+ *   await outbox.queue(event, { tx: { query: (text, params) => tx.$executeRawUnsafe(text, ...params) } })
+ * })
+ * ```
+ */
+type QueryExecutor = {
+  query: (text: string, params: unknown[]) => Promise<unknown>
+}
+
+/**
+ * A transaction to store messages in: a postgres.js transaction or any {@link QueryExecutor}.
+ */
+type OutboxTransaction = TransactionSql | QueryExecutor
+
+/**
  * Options for publishing messages to the outbox.
  *
  * @example
@@ -156,7 +185,7 @@ type PublishOptions = {
   /** Optional partition key for horizontal scaling. Messages with the same partition key are processed by the same consumer. */
   partitionKey?: string
   /** Optional transaction to include the message in. When provided, the message is only committed if the transaction succeeds. */
-  tx?: TransactionSql
+  tx?: OutboxTransaction
 }
 
 /**
@@ -234,7 +263,7 @@ type IOutboxConsumer<Message extends JSONValue> = {
   /** Queues messages to the primary outbox (WAL-based, guaranteed delivery) */
   queue: Publish<Message>
   /** Sends messages to the async outbox (polling-based, eventual delivery) */
-  send: (message: MessageEnvelope<Message> | MessageEnvelope<Message>[], tx?: TransactionSql) => Promise<void>
+  send: (message: MessageEnvelope<Message> | MessageEnvelope<Message>[], tx?: OutboxTransaction) => Promise<void>
   /** Gets the underlying PostgreSQL connection */
   getDbConnection(): Sql
   /** Gets the consumer configuration parameters */
@@ -306,6 +335,8 @@ export type {
   NowFunction,
   Publish,
   PublishOptions,
+  QueryExecutor,
   Start,
   Stop,
+  OutboxTransaction,
 }

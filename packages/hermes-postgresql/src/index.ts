@@ -213,8 +213,10 @@ export {
   type NowFunction,
   type Publish,
   type PublishOptions,
+  type QueryExecutor,
   type Start,
   type Stop,
+  type OutboxTransaction,
 } from './common/types.js'
 export { createOutboxConsumer } from './outbox/createOutboxConsumer.js'
 export { OutboxConsumer } from './outbox/OutboxConsumer.js'

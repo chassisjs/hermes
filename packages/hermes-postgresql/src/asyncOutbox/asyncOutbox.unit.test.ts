@@ -22,6 +22,7 @@ const createMockSql = () => {
   Object.assign(sql, {
     end: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
     json: jest.fn<(p: JSONValue) => postgres.Parameter>().mockReturnValue(mockJsonValue as any),
+    unsafe: jest.fn<(text: string, params?: unknown[]) => Promise<unknown[]>>().mockResolvedValue([]),
   })
   return sql
 }
@@ -67,19 +68,12 @@ describe('AsyncOutboxConsumer', () => {
 
       await consumer.send(message)
 
-      expect(mockSql as any).toHaveBeenCalledWith(
-        [
-          expect.stringContaining('INSERT INTO "asyncOutbox"'),
-          expect.any(String),
-          expect.any(String),
-          expect.any(String),
-          expect.any(String),
-        ],
+      expect((mockSql as any).unsafe).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO "asyncOutbox"'), [
         defaultParams.consumerName,
         message.messageId,
         message.messageType,
-        mockJsonValue,
-      )
+        JSON.stringify(message.message),
+      ])
     })
 
     test('should throw error if consumer not started', async () => {

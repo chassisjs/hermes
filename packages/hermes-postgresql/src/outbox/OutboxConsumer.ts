@@ -1,6 +1,6 @@
 import { assert, Duration, swallow } from '@chassisjs/hermes'
 import { setTimeout } from 'node:timers/promises'
-import postgres, { JSONValue, Options, PostgresType, Sql, TransactionSql } from 'postgres'
+import postgres, { JSONValue, Options, PostgresType } from 'postgres'
 import { getSlotName, PublicationName } from '../common/consts.js'
 import { ConsumerCreationParams } from '../common/ConsumerCreationParams.js'
 import { HermesConsumerAlreadyTakenError } from '../common/errors.js'
@@ -10,9 +10,11 @@ import {
   InsertResult,
   IOutboxConsumer,
   MessageEnvelope,
+  OutboxTransaction,
   PublishOptions,
   Stop,
 } from '../common/types.js'
+import { insertRowsAtomically } from '../common/queryExecutor.js'
 import {
   createSerializedPublishingQueue,
   MessageToPublish,
@@ -95,7 +97,7 @@ import { OutboxConsumerState, OutboxConsumerStore } from './OutboxConsumerState.
 export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsumer<Message> {
   private _sql: HermesSql | null = null
   private _sendAsync:
-    ((message: MessageEnvelope<Message> | MessageEnvelope<Message>[], tx?: TransactionSql) => Promise<void>) | null =
+    ((message: MessageEnvelope<Message> | MessageEnvelope<Message>[], tx?: OutboxTransaction) => Promise<void>) | null =
     null
 
   /**
@@ -472,20 +474,20 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
    *
    * ## Transaction Behavior
    *
-   * - If `options.tx` is provided, uses that transaction
-   * - If already in a transaction (savepoint exists), uses current transaction
-   * - Otherwise, creates a new transaction automatically
+   * - If `options.tx` is provided, the messages are stored in that transaction. It can be a postgres.js
+   *   transaction or the transaction of any other library wrapped as a {@link QueryExecutor}
+   * - Otherwise, they are stored on Hermes' own connection
    *
    * ## Array Handling
    *
    * When queuing multiple messages:
-   * - All messages inserted in same transaction
-   * - Either all succeed or all fail (atomicity guaranteed)
+   * - Up to 1000 messages are inserted with one statement; more are inserted in a transaction
+   * - Either all succeed or all fail (atomicity guaranteed), also without `options.tx`
    * - Messages delivered in order within same partition key
    *
    * @param message - A single message or array of messages to queue
    * @param options - Optional configuration
-   * @param options.tx - PostgreSQL transaction to use (recommended for consistency)
+   * @param options.tx - Transaction to store the messages in (recommended for consistency): a postgres.js transaction or a {@link QueryExecutor}
    * @param options.partitionKey - Partition key for horizontal scaling (default: 'default')
    *
    * @returns Promise that resolves when message(s) are committed to outbox table
@@ -605,23 +607,15 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
     assert(this._sql)
 
     const partitionKey = options?.partitionKey || 'default'
-    const sql = options?.tx || this._sql
+    const messages = Array.isArray(message) ? message : [message]
 
-    if (Array.isArray(message)) {
-      if ('savepoint' in sql) {
-        for (const m of message) {
-          await this._publishOne(sql as any, m, partitionKey)
-        }
-      } else {
-        await sql.begin(async (sql) => {
-          for (const m of message) {
-            await this._publishOne(sql as any, m, partitionKey)
-          }
-        })
-      }
-    } else {
-      await this._publishOne(sql as any, message, partitionKey)
-    }
+    await insertRowsAtomically(
+      this._sql,
+      options?.tx,
+      'outbox',
+      [{ name: 'messageId' }, { name: 'messageType' }, { name: 'partitionKey' }, { name: 'data', cast: 'text::jsonb' }],
+      messages.map((m) => [m.messageId, m.messageType, partitionKey, JSON.stringify(m.message)]),
+    )
   }
 
   /**
@@ -667,7 +661,7 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
    * ```
    *
    * @param message - A single message or array of messages to send
-   * @param tx - Optional PostgreSQL transaction to use
+   * @param tx - Optional transaction to use: a postgres.js transaction or a {@link QueryExecutor}
    *
    * @returns Promise that resolves when message(s) are inserted into async outbox table
    *
@@ -781,15 +775,11 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
    * @see {@link useBasicAsyncOutboxConsumerPolicy} - How to enable async outbox
    * @see {@link ConsumerCreationParams.asyncOutbox} - Configuration option
    */
-  async send(message: MessageEnvelope<Message> | MessageEnvelope<Message>[], tx?: TransactionSql) {
+  async send(message: MessageEnvelope<Message> | MessageEnvelope<Message>[], tx?: OutboxTransaction) {
     if (this._sendAsync === null) {
       throw new Error(`AsyncOutbox hasn't been initialized.`)
     }
 
     return await this._sendAsync(message, tx)
-  }
-
-  private async _publishOne(sql: Sql, message: MessageEnvelope<Message>, partitionKey = 'default') {
-    await sql`INSERT INTO outbox ("messageId", "messageType", "partitionKey", "data") VALUES(${message.messageId}, ${message.messageType}, ${partitionKey}, ${sql.json(message.message)})`
   }
 }

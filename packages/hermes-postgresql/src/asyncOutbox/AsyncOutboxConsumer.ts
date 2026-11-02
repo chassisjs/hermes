@@ -1,7 +1,8 @@
 import { Duration } from '@chassisjs/hermes'
-import { JSONValue, Sql, TransactionSql } from 'postgres'
+import { JSONValue } from 'postgres'
 import { AsyncOrSync } from 'ts-essentials'
-import { HermesSql, MessageEnvelope, Stop } from '../common/types.js'
+import { insertRowsAtomically } from '../common/queryExecutor.js'
+import { HermesSql, MessageEnvelope, OutboxTransaction, Stop } from '../common/types.js'
 
 /**
  * Envelope for messages in the async outbox with processing metadata.
@@ -28,7 +29,7 @@ type HermesAsyncMessageEnvelope<Message> = {
  */
 type PublishOptions = {
   /** Optional transaction for atomic operations */
-  tx?: TransactionSql
+  tx?: OutboxTransaction
 }
 
 /**
@@ -232,23 +233,15 @@ class AsyncOutboxConsumer<Message extends JSONValue> implements IAsyncOutboxCons
       throw new Error('Database connection not established. Call start() first.')
     }
 
-    const sql = options?.tx || this._getSql()
+    const messages = Array.isArray(message) ? message : [message]
 
-    if (Array.isArray(message)) {
-      if ('savepoint' in sql) {
-        for (const m of message) {
-          await this._publishOne(sql as any, m)
-        }
-      } else {
-        await sql.begin(async (sql) => {
-          for (const m of message) {
-            await this._publishOne(sql as any, m)
-          }
-        })
-      }
-    } else {
-      await this._publishOne(sql as any, message)
-    }
+    await insertRowsAtomically(
+      this._getSql(),
+      options?.tx,
+      'asyncOutbox',
+      [{ name: 'consumerName' }, { name: 'messageId' }, { name: 'messageType' }, { name: 'data', cast: 'text::jsonb' }],
+      messages.map((m) => [this._params.consumerName, m.messageId, m.messageType, JSON.stringify(m.message)]),
+    )
   }
 
   /**
@@ -307,22 +300,6 @@ class AsyncOutboxConsumer<Message extends JSONValue> implements IAsyncOutboxCons
     }
 
     this._started = false
-  }
-
-  private async _publishOne(sql: Sql, message: MessageEnvelope<Message>) {
-    await sql`
-      INSERT INTO "asyncOutbox" (
-        "consumerName",
-        "messageId",
-        "messageType",
-        "data"
-      ) VALUES (
-        ${this._params.consumerName},
-        ${message.messageId},
-        ${message.messageType},
-        ${this._getSql().json(message.message)}
-      )
-    `
   }
 
   private _startPolling(): void {
