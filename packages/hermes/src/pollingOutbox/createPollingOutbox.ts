@@ -122,15 +122,17 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
         }
       })()
 
-      return async () => {
-        if (stopping.signal.aborted) {
-          return
-        }
+      let stopped: Promise<void> | undefined
 
-        stopping.abort()
-        await polling
-        await swallow(() => policy.release({ owner }))
-        isStarted = false
+      return () => {
+        stopped ??= (async () => {
+          stopping.abort()
+          await polling
+          await swallow(() => policy.release({ owner }))
+          isStarted = false
+        })()
+
+        return stopped
       }
     },
   }

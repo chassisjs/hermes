@@ -461,6 +461,38 @@ describe('createPollingOutbox', () => {
     expect(onDbError).toHaveBeenCalledTimes(2)
   })
 
+  test('a second call of stop waits until the outbox is stopped', async () => {
+    const { store, add, rows } = createInMemoryStore()
+    let release = () => {}
+    let isPublishing = false
+
+    add(1)
+
+    const stop = createPollingOutbox({
+      ...fast,
+      policy: usePartitionOrderingPolicy(store),
+      publish: () =>
+        new Promise<void>((resolve) => {
+          isPublishing = true
+          release = resolve
+        }),
+    }).start()
+
+    await waitUntil(() => isPublishing)
+
+    const first = stop()
+    let isSecondDone = false
+    const second = stop().then(() => (isSecondDone = true))
+
+    await setTimeout(20)
+    expect(isSecondDone).toBe(false)
+
+    release()
+    await Promise.all([first, second])
+
+    expect(rows[0].delivered).toBe(true)
+  })
+
   test('cannot be started twice, and can be started again after stop', async () => {
     const { store } = createInMemoryStore()
     const outbox = createPollingOutbox({ ...fast, policy: usePartitionOrderingPolicy(store), publish: () => {} })

@@ -212,7 +212,8 @@ type PollingOutbox = {
   /**
    * Starts polling.
    *
-   * @returns A function that stops polling, waits for the messages being published and releases the claims.
+   * @returns A function that stops polling, waits for the messages being published and releases the claims. Every
+   * call returns the same promise, so a second call also waits until the outbox is stopped.
    */
   start(): () => Promise<void>
 }
