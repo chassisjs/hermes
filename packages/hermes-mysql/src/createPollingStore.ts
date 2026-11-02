@@ -34,6 +34,14 @@ const microseconds = (duration: Duration) => Math.round(duration.ms * 1000)
  * The claims use `SELECT ... FOR UPDATE SKIP LOCKED` (MySQL 8.0+) in `READ COMMITTED` transactions, and all the times
  * are computed with the clock of MySQL.
  *
+ * `claimPartitions` first finds the partitions with undelivered messages with a skip scan of an index (one index
+ * lookup per partition), so the cost of a poll does not grow with the number of undelivered messages. It adds the new
+ * ones to `hermes_outbox_partition` and removes the free partitions without undelivered messages. It reads the
+ * messages with plain `SELECT`s: in MySQL, a subquery of `INSERT ... SELECT` or `DELETE` locks the rows it reads, so it
+ * would wait for the open transactions of the application. It does it before the claim, in other statements, so it
+ * does not hold the locks of the partitions while it claims them. The next poll adds a removed partition again when
+ * it gets new messages, so a message that commits during the removal is not lost.
+ *
  * @param getPool - Returns the `mysql2` pool
  * @param scope - The consumer and, optionally, the partition whose messages the store reads
  */
@@ -63,20 +71,22 @@ const createPollingStore = <Message>(
       await getPool().query(
         `UPDATE \`${OutboxTable}\`
          SET \`delivered_at\` = NOW(6), \`claimed_by\` = NULL, \`claimed_until\` = NULL
-         WHERE \`position\` = ?`,
+         WHERE \`position\` = ? AND \`delivered_at\` IS NULL`,
         [message.id],
       )
     },
 
-    async markFailed(message, { retryAfter }) {
+    async markFailed(message, { retryAfter, owner }) {
       await getPool().query(
         `UPDATE \`${OutboxTable}\`
          SET \`attempts\` = \`attempts\` + 1,
              \`next_attempt_at\` = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND),
              \`claimed_by\` = NULL,
              \`claimed_until\` = NULL
-         WHERE \`position\` = ?`,
-        [microseconds(retryAfter), message.id],
+         WHERE \`position\` = ?
+           AND \`delivered_at\` IS NULL
+           AND (\`claimed_by\` IS NULL OR \`claimed_by\` = ?)`,
+        [microseconds(retryAfter), message.id, owner],
       )
     },
 
@@ -134,20 +144,50 @@ const createPollingStore = <Message>(
       const { where, params } = inScope('m')
       const { where: partitionWhere, params: partitionParams } = inScope('p')
 
-      // A separate transaction: it commits at once, so it does not hold locks of the partitions.
-      await inTransaction(pool, (connection) =>
-        connection.query(
-          `INSERT IGNORE INTO \`${PartitionTable}\` (\`consumer_name\`, \`partition_key\`)
-           SELECT DISTINCT m.\`consumer_name\`, m.\`partition_key\` FROM \`${OutboxTable}\` m
-           WHERE ${where}
-             AND m.\`delivered_at\` IS NULL
-             AND NOT EXISTS (
-               SELECT 1 FROM \`${PartitionTable}\` p
-               WHERE p.\`consumer_name\` = m.\`consumer_name\` AND p.\`partition_key\` = m.\`partition_key\`
-             )`,
-          params,
-        ),
+      const [pending] = await pool.query<RowDataPacket[]>(
+        `WITH RECURSIVE pending (partition_key) AS (
+           SELECT MIN(m.\`partition_key\`) FROM \`${OutboxTable}\` m
+           WHERE ${where} AND m.\`delivered_at\` IS NULL
+           UNION ALL
+           SELECT (
+             SELECT MIN(m.\`partition_key\`) FROM \`${OutboxTable}\` m
+             WHERE ${where} AND m.\`delivered_at\` IS NULL AND m.\`partition_key\` > pending.partition_key
+           )
+           FROM pending
+           WHERE pending.partition_key IS NOT NULL
+         )
+         SELECT /*+ SET_VAR(cte_max_recursion_depth = 4294967295) */ pending.partition_key FROM pending
+         WHERE pending.partition_key IS NOT NULL`,
+        [...params, ...params],
       )
+      const [registered] = await pool.query<RowDataPacket[]>(
+        `SELECT p.\`partition_key\`, p.\`claimed_until\` IS NULL OR p.\`claimed_until\` < NOW(6) AS is_free
+         FROM \`${PartitionTable}\` p
+         WHERE ${partitionWhere}`,
+        partitionParams,
+      )
+      const pendingKeys = new Set(pending.map((row) => String(row.partition_key)))
+      const registeredKeys = new Set(registered.map((row) => String(row.partition_key)))
+      const missing = [...pendingKeys].filter((key) => !registeredKeys.has(key))
+      const empty = registered
+        .filter((row) => Number(row.is_free) === 1 && !pendingKeys.has(String(row.partition_key)))
+        .map((row) => String(row.partition_key))
+
+      if (missing.length) {
+        await pool.query(`INSERT IGNORE INTO \`${PartitionTable}\` (\`consumer_name\`, \`partition_key\`) VALUES ?`, [
+          missing.map((key) => [consumerName, key]),
+        ])
+      }
+
+      if (empty.length) {
+        await pool.query(
+          `DELETE FROM \`${PartitionTable}\`
+           WHERE \`consumer_name\` = ?
+             AND \`partition_key\` IN (?)
+             AND (\`claimed_until\` IS NULL OR \`claimed_until\` < NOW(6))`,
+          [consumerName, empty],
+        )
+      }
 
       return inTransaction(pool, async (connection) => {
         const [rows] = await connection.query<RowDataPacket[]>(
@@ -204,12 +244,14 @@ const createPollingStore = <Message>(
       )
     },
 
-    async releasePartitions({ owner, partitionKeys }) {
+    async releasePartitions({ owner }) {
+      const { where, params } = inScope('p')
+
       await getPool().query(
-        `UPDATE \`${PartitionTable}\`
-         SET \`claimed_by\` = NULL, \`claimed_until\` = NULL
-         WHERE \`consumer_name\` = ? AND \`partition_key\` IN (?) AND \`claimed_by\` = ?`,
-        [consumerName, partitionKeys, owner],
+        `UPDATE \`${PartitionTable}\` p
+         SET p.\`claimed_by\` = NULL, p.\`claimed_until\` = NULL
+         WHERE ${where} AND p.\`claimed_by\` = ?`,
+        [...params, owner],
       )
     },
   }

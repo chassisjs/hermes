@@ -21,25 +21,26 @@ const migrations: Migration[] = [
     statements: [
       `CREATE TABLE IF NOT EXISTS \`${OutboxTable}\` (
         \`position\`         BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT,
-        \`consumer_name\`    VARCHAR(250)     NOT NULL,
-        \`partition_key\`    VARCHAR(250)     NOT NULL DEFAULT 'default',
+        \`consumer_name\`    VARCHAR(250)     COLLATE utf8mb4_bin NOT NULL,
+        \`partition_key\`    VARCHAR(250)     COLLATE utf8mb4_bin NOT NULL DEFAULT 'default',
         \`message_id\`       VARCHAR(250)     NOT NULL,
         \`message_type\`     VARCHAR(250)     NOT NULL,
         \`data\`             JSON             NOT NULL,
         \`added_at\`         DATETIME(6)      NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
         \`attempts\`         INT UNSIGNED     NOT NULL DEFAULT 0,
         \`next_attempt_at\`  DATETIME(6)      NULL,
-        \`claimed_by\`       VARCHAR(250)     NULL,
+        \`claimed_by\`       VARCHAR(250)     COLLATE utf8mb4_bin NULL,
         \`claimed_until\`    DATETIME(6)      NULL,
         \`delivered_at\`     DATETIME(6)      NULL,
         PRIMARY KEY (\`position\`),
         KEY \`idx_hermes_outbox_pending\` (\`consumer_name\`, \`delivered_at\`, \`position\`),
-        KEY \`idx_hermes_outbox_partition\` (\`consumer_name\`, \`partition_key\`, \`delivered_at\`, \`position\`)
+        KEY \`idx_hermes_outbox_partition\` (\`consumer_name\`, \`partition_key\`, \`delivered_at\`, \`position\`),
+        KEY \`idx_hermes_outbox_pending_partitions\` (\`consumer_name\`, \`delivered_at\`, \`partition_key\`)
       ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4`,
       `CREATE TABLE IF NOT EXISTS \`${PartitionTable}\` (
-        \`consumer_name\`  VARCHAR(250)  NOT NULL,
-        \`partition_key\`  VARCHAR(250)  NOT NULL,
-        \`claimed_by\`     VARCHAR(250)  NULL,
+        \`consumer_name\`  VARCHAR(250)  COLLATE utf8mb4_bin NOT NULL,
+        \`partition_key\`  VARCHAR(250)  COLLATE utf8mb4_bin NOT NULL,
+        \`claimed_by\`     VARCHAR(250)  COLLATE utf8mb4_bin NULL,
         \`claimed_until\`  DATETIME(6)   NULL,
         PRIMARY KEY (\`consumer_name\`, \`partition_key\`)
       ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4`,

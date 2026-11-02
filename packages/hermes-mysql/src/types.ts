@@ -72,7 +72,7 @@ type HermesMessageEnvelope<Message extends JSONValue> = {
 type PublishOptions = {
   /** The transaction of the application to store the messages in. Without it, the messages are stored at once. */
   tx?: OutboxTransaction
-  /** The partition of the messages (at most 250 characters). @defaultValue `'default'` */
+  /** The partition of the messages (at most 250 characters). @defaultValue the `partitionKey` of the consumer, or `'default'` */
   partitionKey?: string
 }
 

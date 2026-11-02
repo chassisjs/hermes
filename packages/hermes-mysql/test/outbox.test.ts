@@ -4,7 +4,13 @@ import { CompiledQuery, Kysely, MysqlDialect } from 'kysely'
 import { createPool as createCallbackPool } from 'mysql2'
 import { type Pool, type PoolOptions, type RowDataPacket } from 'mysql2/promise'
 import { setTimeout } from 'node:timers/promises'
-import { createOutboxConsumer, type ConsumerCreationParams, type HermesMessageEnvelope, migrate } from '../src/index.js'
+import {
+  createOutboxConsumer,
+  createPollingStore,
+  type ConsumerCreationParams,
+  type HermesMessageEnvelope,
+  migrate,
+} from '../src/index.js'
 import { createMySql } from './mysql.js'
 
 jest.setTimeout(Duration.ofMinutes(5).ms)
@@ -374,20 +380,169 @@ describe('Consumers and partitions', () => {
 
       await migrate(tenant.getDbConnection())
       await tenant.queue(envelope('app-tenant'), { partitionKey: 'tenant-0b1e8c8e-5f37-4a5e-9b8f-2f0c6a3d9e11' })
-      await tenant.queue(envelope('app-default'))
+      await tenant.queue(envelope('app-own'))
+      await tenant.queue(envelope('app-default'), { partitionKey: 'default' })
       await all.queue(envelope('audit-a'), { partitionKey: 'a' })
       await all.queue(envelope('audit-b'), { partitionKey: 'b' })
       await billing.queue(envelope('billing'))
 
       const stops = await Promise.all([tenant.start(), all.start(), billing.start()])
 
-      await waitUntil(() => published.tenant.length + published.all.length + published.billing.length === 4)
+      await waitUntil(() => published.tenant.length + published.all.length + published.billing.length === 5)
       await setTimeout(300)
       await Promise.all(stops.map((stop) => stop()))
 
-      expect(published.tenant).toEqual(['app-tenant'])
+      expect(published.tenant).toEqual(['app-tenant', 'app-own'])
       expect([...published.all].sort()).toEqual(['audit-a', 'audit-b'])
       expect(published.billing).toEqual(['billing'])
+    })
+  })
+})
+
+describe('Review fixes', () => {
+  test('queue() stores the messages in the partition of the consumer by default', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const published: string[] = []
+      const outbox = createConsumer(
+        options,
+        ({ messageId }) => {
+          published.push(messageId)
+        },
+        { partitionKey: 'tenant-1' },
+      )
+      const stop = await outbox.start()
+
+      await outbox.queue(envelope('own'))
+      await outbox.queue(envelope('other'), { partitionKey: 'tenant-2' })
+
+      await waitUntil(() => published.length === 1)
+      await setTimeout(200)
+      await stop()
+
+      expect(published).toEqual(['own'])
+      expect(
+        await select(pool, 'SELECT `message_id`, `partition_key` FROM `hermes_outbox` ORDER BY `position`'),
+      ).toEqual([
+        { message_id: 'own', partition_key: 'tenant-1' },
+        { message_id: 'other', partition_key: 'tenant-2' },
+      ])
+    })
+  })
+
+  test('partition keys and consumer names are case and accent sensitive', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const published: string[] = []
+      const outbox = createConsumer(options, ({ messageId, partitionKey }) => {
+        published.push(`${partitionKey}:${messageId}`)
+      })
+      const stop = await outbox.start()
+
+      await outbox.queue(envelope('1'), { partitionKey: 'Tenant-A' })
+      await outbox.queue(envelope('2'), { partitionKey: 'tenant-a' })
+      await outbox.queue(envelope('3'), { partitionKey: 'tenant-á' })
+
+      await waitUntil(() => published.length === 3)
+      await stop()
+
+      expect([...published].sort()).toEqual(['Tenant-A:1', 'tenant-a:2', 'tenant-á:3'])
+      expect(
+        await select(pool, "SELECT COUNT(*) AS count FROM `hermes_outbox` WHERE `partition_key` = 'tenant-a'"),
+      ).toEqual([{ count: '1' }])
+    })
+  })
+
+  test('stop can be called many times at once', async () => {
+    await mysql.withDatabase(async ({ options }) => {
+      const stop = await createConsumer(options, () => {}).start()
+
+      await Promise.all([stop(), stop(), stop()])
+      await stop()
+    })
+  })
+
+  test('a failed start can be started again', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const database = `${options.database}_later`
+      const outbox = createConsumer({ ...options, database }, () => {})
+
+      await expect(outbox.start()).rejects.toThrow(/Unknown database/)
+
+      await pool.query(`CREATE DATABASE \`${database}\``)
+
+      const stop = await outbox.start()
+
+      await stop()
+    })
+  })
+
+  test('a failure reported after the claim expired keeps the claim of another instance', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const outbox = createConsumer(options, () => {})
+      const store = createPollingStore<Event>(() => pool, { consumerName: 'app' })
+
+      await migrate(pool)
+      await outbox.queue(envelope('m1'))
+
+      const [claimedByFirst] = await store.claimMessages({
+        owner: 'first',
+        lease: Duration.ofMiliseconds(50),
+        limit: 1,
+      })
+
+      await setTimeout(100)
+
+      const [claimedBySecond] = await store.claimMessages({ owner: 'second', lease: Duration.ofSeconds(30), limit: 1 })
+
+      expect(claimedBySecond.messageId).toBe('m1')
+
+      await store.markFailed(claimedByFirst, { retryAfter: Duration.ofSeconds(1), owner: 'first' })
+
+      expect(await select(pool, 'SELECT `claimed_by`, `attempts`, `next_attempt_at` FROM `hermes_outbox`')).toEqual([
+        { claimed_by: 'second', attempts: 0, next_attempt_at: null },
+      ])
+
+      await store.markDelivered(claimedBySecond)
+      await store.markFailed(claimedBySecond, { retryAfter: Duration.ofSeconds(1), owner: 'second' })
+
+      expect(await select(pool, 'SELECT `attempts` FROM `hermes_outbox`')).toEqual([{ attempts: 0 }])
+
+      await outbox.getDbConnection().end()
+    })
+  })
+
+  test('finds the partitions with undelivered messages, also more than 1000 of them, and removes the empty ones', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const outbox = createConsumer(options, () => {})
+      const store = createPollingStore<Event>(() => pool, { consumerName: 'app' })
+      const count = async () =>
+        Number(
+          (await select<{ count: string }>(pool, 'SELECT COUNT(*) AS count FROM `hermes_outbox_partition`'))[0].count,
+        )
+
+      await migrate(pool)
+      for (let i = 0; i < 1200; i++) {
+        await outbox.queue(envelope(`m${i}`), { partitionKey: `p${String(i).padStart(4, '0')}` })
+      }
+
+      await store.claimPartitions({ owner: 'first', lease: Duration.ofSeconds(30), limit: 10 })
+
+      expect(await count()).toBe(1200)
+
+      await pool.query("UPDATE `hermes_outbox` SET `delivered_at` = NOW(6) WHERE `partition_key` <> 'p0042'")
+      await store.releasePartitions({ owner: 'first' })
+
+      expect(await store.claimPartitions({ owner: 'first', lease: Duration.ofSeconds(30), limit: 10 })).toEqual([
+        'p0042',
+      ])
+      expect(await count()).toBe(1)
+
+      await store.releasePartitions({ owner: 'first' })
+
+      expect(
+        await select(pool, 'SELECT `claimed_by` FROM `hermes_outbox_partition` WHERE `claimed_by` IS NOT NULL'),
+      ).toEqual([])
+
+      await outbox.getDbConnection().end()
     })
   })
 })

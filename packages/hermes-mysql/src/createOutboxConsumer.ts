@@ -54,6 +54,12 @@ const createOutboxConsumer = <Message extends JSONValue>(
 
     return pool
   }
+  const closePool = async () => {
+    const closing = pool
+
+    pool = null
+    await closing?.end()
+  }
 
   return {
     async start() {
@@ -67,6 +73,7 @@ const createOutboxConsumer = <Message extends JSONValue>(
         }
       } catch (error) {
         isStarted = false
+        await closePool().catch(() => {})
         throw error
       }
 
@@ -94,18 +101,16 @@ const createOutboxConsumer = <Message extends JSONValue>(
         onDbError: params.onDbError,
       }).start()
 
-      return async () => {
-        if (!isStarted) {
-          return
-        }
+      let stopping: Promise<void> | undefined
 
-        await stopPolling()
+      return () => {
+        stopping ??= (async () => {
+          await stopPolling()
+          await closePool()
+          isStarted = false
+        })()
 
-        const closing = pool
-
-        pool = null
-        isStarted = false
-        await closing?.end()
+        return stopping
       }
     },
 
@@ -125,7 +130,7 @@ const createOutboxConsumer = <Message extends JSONValue>(
         ],
         messages.map((m) => [
           consumerName,
-          options?.partitionKey || 'default',
+          options?.partitionKey || partitionKey || 'default',
           m.messageId,
           m.messageType,
           JSON.stringify(m.message),

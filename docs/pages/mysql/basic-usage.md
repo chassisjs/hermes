@@ -90,7 +90,7 @@ await prisma.$transaction(async (tx) => {
 
 ## Partitions and many instances
 
-The messages of a partition are published one by one, in the order of their positions. `partitionKey` defaults to `'default'`. Use e.g. the id of a tenant or of an aggregate when the order matters only inside it.
+The messages of a partition are published one by one, in the order of their positions. The `partitionKey` of `queue()` defaults to the `partitionKey` of the consumer, or to `'default'` when the consumer has none. Partition keys and consumer names are case and accent sensitive (`utf8mb4_bin`). Use e.g. the id of a tenant or of an aggregate when the order matters only inside it.
 
 You can run many instances of your application. Every instance claims free partitions (up to `maxPartitions`, 10 by default) for a lease (`lease`, 30 seconds by default) and renews it while it publishes. So:
 
