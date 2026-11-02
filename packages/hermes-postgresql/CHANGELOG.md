@@ -1,5 +1,38 @@
 # Change Log
 
+# [1.0.0-alpha.19](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.18...v1.0.0-alpha.19) (2026-11-02)
+
+A bigger release: backpressure, transactions of any database library, partitions that actually separate messages, and postgres.js 4.
+
+## ⚠️ Breaking changes
+
+- **Node `^20.19.0 || >=22.12.0` is required.** Hermes PostgreSQL now uses postgres.js 4, which is ESM-only and needs Node 20+. The CommonJS build relies on `require(esm)`, enabled by default from Node 20.19 and 22.12.
+- **postgres.js 4 typings.** A postgres.js 3 transaction passed as `tx` still works at runtime, but no longer type-checks. Upgrade postgres.js to 4 in your app as well. `getDbConnection()` returns a postgres.js 4 connection.
+- `JSONValue` is now defined and exported by Hermes (postgres.js 4 does not export it); the definition is the same as before.
+
+## Features
+
+- **Backpressure.** The new `maxQueueSize` option (default `1000`) limits the transactions waiting to be published or acknowledged. When the limit is reached, Hermes stops reading the replication stream, so PostgreSQL keeps the changes in the WAL instead of your app keeping them in memory. Reading resumes when the queue drops to half the limit. With `serialization: false`, it also caps the concurrent `publish` calls. While paused, Hermes sends its status every 10 seconds, so keep `wal_sender_timeout` above 10 seconds.
+- **Transactions of any database library.** `queue(message, { tx })` and `send(message, tx)` accept a postgres.js transaction or any object with `query(text, params)`. A `pg` client and TypeORM's `QueryRunner` work as they are; see the docs for Kysely, Drizzle and Prisma.
+
+```typescript
+const client = await pool.connect()
+await client.query('BEGIN')
+await outbox.queue(event, { tx: client })
+await client.query('COMMIT')
+```
+
+- Batches (`queue([...])`, `send([...])`) of any size are stored all or none, also without a transaction.
+
+## Bug fixes
+
+- **Partitions.** A consumer published the messages of every partition. Now it publishes only the messages of its `partitionKey`.
+- **Partition and consumer names.** Names that PostgreSQL does not accept as a replication slot name (e.g. `tenant-1`, or longer than 63 characters) failed on `start()`. They now get a valid slot name. Names that worked before keep their slot.
+
+## Known limitations
+
+See the [backlog](https://github.com/chassisjs/hermes/blob/main/docs/BACKLOG.md): the async outbox does not separate consumers nor partitions yet.
+
 # [1.0.0-alpha.18](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.17...v1.0.0-alpha.18) (2026-11-01)
 
 A reliability release. It fixes how messages are acknowledged and how the consumer stops. No API changes.

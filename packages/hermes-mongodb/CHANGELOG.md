@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# [1.0.0-alpha.19](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.18...v1.0.0-alpha.19) (2026-11-02)
+
+### Documentation
+
+- API docs: `@chassisjs` package names, MongoDB 5.0+, the real collection names (`__outboxMessages`, `__outboxConsumers`), and what happens to events past the oplog window.
+
+### Chores
+
+- Development dependencies updated. No changes in the runtime code.
+
 # [1.0.0-alpha.7](https://github.com/chassisjs/hermes/compare/@chassisjs/hermes-mongodb@1.0.0-alpha.6...@chassisjs/hermes-mongodb@1.0.0-alpha.7) (2024-08-21)
 
 ### Features

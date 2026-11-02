@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# [1.0.0-alpha.19](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.18...v1.0.0-alpha.19) (2026-11-02)
+
+### Chores
+
+- `uuid` updated to 14.0.3. No changes in the code.
+
 # [1.0.0-alpha.7](https://github.com/chassisjs/hermes/compare/@chassisjs/hermes@1.0.0-alpha.6...@chassisjs/hermes@1.0.0-alpha.7) (2024-08-21)
 
 ### Features
