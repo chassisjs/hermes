@@ -77,9 +77,9 @@ Your Event Handlers
 ### Key Benefits
 
 - ✅ **Atomic operations**: Data and events committed together
-- ✅ **No message loss**: Change Streams ensure durability
+- ✅ **No message loss**: events are stored in the same transaction as your data; keep the consumer running within the oplog retention window
 - ✅ **Real-time delivery**: No polling overhead
-- ✅ **At-least-once guarantee**: Events redelivered on failure
+- ✅ **At-least-once guarantee**: a failed publish is retried until it succeeds
 - ✅ **Simple API**: Minimal code changes required
 
 ## MongoDB Change Streams vs PostgreSQL Logical Replication
@@ -170,12 +170,12 @@ await client.connect()
 
 - Use `directConnection=true` for local development
 - For production, use replica sets (required for Change Streams)
-- Change Streams require MongoDB 3.6+ running as a replica set
+- Hermes MongoDB requires MongoDB 5.0+ running as a replica set (Change Streams)
 
 ### 4. Create Outbox Consumer
 
 ```typescript
-import { createOutboxConsumer } from '@arturwojnar/hermes-mongodb'
+import { createOutboxConsumer } from '@chassisjs/hermes-mongodb'
 
 const outbox = createOutboxConsumer<MedicineEvent>({
   client,
@@ -197,8 +197,8 @@ const outbox = createOutboxConsumer<MedicineEvent>({
   },
 })
 
-// Start consuming events
-outbox.start()
+// Start consuming events (it throws for MongoDB older than 5.0)
+const stop = await outbox.start()
 ```
 
 **Key configuration:**
@@ -283,170 +283,7 @@ This approach is simpler but less flexible if you need more control over the tra
 
 Here's the full working implementation:
 
-```typescript
-import { createOutboxConsumer } from '@arturwojnar/hermes-mongodb'
-import { MongoDBContainer } from '@testcontainers/mongodb'
-import chalk from 'chalk'
-import cors from 'cors'
-import express from 'express'
-import helmet from 'helmet'
-import { MongoClient } from 'mongodb'
-import ora from 'ora'
-import { AbstractStartedContainer, Wait } from 'testcontainers'
-import { v4 as uuid } from 'uuid'
-
-type DomainEvent<Name extends string, Data> = Readonly<{
-  name: Name
-  data: Data
-}>
-
-type MedicineAssigned = DomainEvent<
-  'MedicineAssigned',
-  {
-    medicineId: string
-    patientId: string
-  }
->
-
-type MedicineTreatmentFinished = DomainEvent<
-  'MedicineTreatmentFinished',
-  {
-    medicineId: string
-    patientId: string
-  }
->
-
-type MedicineEvent = MedicineAssigned | MedicineTreatmentFinished
-
-type MedicineAssignment = Readonly<{
-  medicineId: string
-  patientId: string
-  createdAt: Date
-}>
-
-const app = express()
-const hostname = '0.0.0.0'
-const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/?directConnection=true'
-const port = process.env.PORT || 3000
-const client = new MongoClient(mongoUri)
-const db = client.db('aid-kit')
-
-// Create outbox consumer
-const outbox = createOutboxConsumer<MedicineEvent>({
-  client,
-  db,
-  publish: async (event) => {
-    console.log(chalk.blue('Received the event'), chalk.blue(JSON.stringify(event, null, 2)))
-  },
-})
-
-app.use(express.json())
-app.use(express.urlencoded({ extended: true }))
-app.use(cors())
-app.use(helmet())
-
-app.get('/healthcheck', (_req, res) => {
-  res.setHeader('Content-Type', 'application/json')
-  res.send(JSON.stringify({ ok: true }, null, 2))
-})
-
-app.post('/test', async (_req, res) => {
-  const entity: MedicineAssignment = {
-    medicineId: uuid(),
-    patientId: uuid(),
-    createdAt: new Date(),
-  }
-
-  // Transactional event publishing
-  const result = await client.withSession((session) =>
-    session.withTransaction(async (session) => {
-      const result = await db.collection<MedicineAssignment>('medicines').insertOne(entity, { session })
-
-      await outbox.publish(
-        {
-          name: 'MedicineAssigned',
-          data: {
-            medicineId: entity.medicineId,
-            patientId: entity.patientId,
-          },
-        },
-        session,
-      )
-
-      return result
-    }),
-  )
-
-  res.setHeader('Content-Type', 'application/json')
-  res.send(result)
-})
-
-app.listen(port)
-
-console.log(chalk.blue(`\r\nApp started at ${port} on ${hostname}.\r\n\r\n`))
-
-// Container management for local development
-let deps: AbstractStartedContainer[] = []
-
-const runDeps = async () => {
-  deps = [
-    await new MongoDBContainer('mongo:7.0')
-      .withNetworkAliases('mongo')
-      .withHostname('mongo')
-      .withExposedPorts({ container: 27017, host: 27017 })
-      .withHealthCheck({
-        test: ['CMD-SHELL', `mongosh --port 27017 --eval "db.adminCommand('ping')" || exit 1`],
-        interval: 10 * 1000,
-        startPeriod: 5 * 1000,
-        timeout: 15 * 1000,
-        retries: 10,
-      })
-      .withWaitStrategy(Wait.forHealthCheck().withStartupTimeout(1 * 60 * 1000))
-      .start(),
-  ]
-}
-
-const stopDeps = async () => {
-  await Promise.all(deps.map((dep) => dep.stop()))
-}
-
-;(async () => {
-  const spinner = ora({ color: 'green', text: 'Starting the dependencies...' })
-
-  try {
-    spinner.start()
-    await runDeps()
-    spinner.succeed()
-
-    spinner.start()
-    spinner.text = 'Connecting to the dependencies...'
-    await client.connect()
-    spinner.succeed()
-
-    outbox.start()
-
-    console.log(chalk.green('Everything is set!\r\n'))
-    console.log(
-      chalk.green(
-        `Now you can run this:\r\n\r\ncurl --location --request POST 'http://localhost:3000/test'\r\n\r\nAnd see how the events are received after successfully persisting an entity 😃❤️`,
-      ),
-    )
-
-    const sigterm = async () => {
-      spinner.text = 'Stopping the dependencies...'
-      await stopDeps()
-      spinner.succeed()
-      process.exit()
-    }
-
-    process.on('SIGINT', sigterm)
-    process.on('SIGTERM', sigterm)
-  } catch (error) {
-    spinner.fail()
-    console.log(chalk.red(error))
-  }
-})()
-```
+<<< @/../examples/mongodb/server/src/index.ts
 
 ## Running the Example
 
@@ -553,7 +390,7 @@ Since Hermes guarantees **at-least-once delivery**, your event handlers may be c
 ```typescript
 publish: async (event) => {
   // Check if already processed
-  const processed = await db.collection('processed_events').findOne({ eventId: event.messageId })
+  const processed = await db.collection('processed_events').findOne({ eventId: event.eventId })
 
   if (processed) {
     console.log('Event already processed, skipping')
@@ -564,7 +401,7 @@ publish: async (event) => {
   await handleEvent(event)
 
   // Mark as processed
-  await db.collection('processed_events').insertOne({ eventId: event.messageId, processedAt: new Date() })
+  await db.collection('processed_events').insertOne({ eventId: event.eventId, processedAt: new Date() })
 }
 ```
 
@@ -613,12 +450,14 @@ mongosh --eval "rs.initiate()"
 
 ### 5. Graceful Shutdown
 
-Always stop the outbox consumer gracefully:
+By default, Hermes stops the consumer on `SIGTERM` and `SIGINT`. With `shouldDisposeOnSigterm: false`, stop it on your own with the function returned by `start()`:
 
 ```typescript
-const cleanup = () => {
-  outbox.stop()
-  client.close()
+const stop = await outbox.start()
+
+const cleanup = async () => {
+  await stop()
+  await client.close()
   process.exit(0)
 }
 
@@ -648,35 +487,11 @@ const outbox2 = createOutboxConsumer<MedicineEvent>({
 })
 ```
 
-Each outbox consumer processes events from its partition independently.
+Each outbox consumer processes events from its partition independently. Run exactly one instance per partition: Hermes MongoDB does not prevent two instances of the same partition from running, and both would publish the same events.
 
-### Custom Collection Names
+### Collections
 
-By default, Hermes creates a collection named `hermes_outbox`. You can customize this:
-
-```typescript
-const outbox = createOutboxConsumer<MedicineEvent>({
-  client,
-  db,
-  publish,
-  collectionName: 'custom_outbox', // Custom outbox collection
-})
-```
-
-### Consumer Name
-
-Prevent multiple consumers from competing:
-
-```typescript
-const outbox = createOutboxConsumer<MedicineEvent>({
-  client,
-  db,
-  publish,
-  consumerName: 'medicine-service', // Unique consumer identifier
-})
-```
-
-Only one consumer with the same name can run at a time.
+Hermes stores the events in the `__outboxMessages` collection and the consumers' positions in the `__outboxConsumers` collection. The names are fixed.
 
 ## Troubleshooting
 
@@ -699,7 +514,7 @@ docker exec -it <container-id> mongosh --eval "rs.initiate()"
 **Check:**
 
 1. Is MongoDB running as a replica set? (`rs.status()`)
-2. Is the outbox consumer started? (`outbox.start()`)
+2. Is the outbox consumer started? (`await outbox.start()`)
 3. Are there errors in the `publish` callback?
 4. Check MongoDB logs for Change Stream errors
 
@@ -741,7 +556,7 @@ Hermes MongoDB supports:
 - ✅ MongoDB **7.x.x**
 - ✅ MongoDB **8.0.0-rc.x**
 
-All versions are tested in CI. See the [test suite](https://github.com/arturwojnar/hermes/blob/main/packages/hermes-mongodb/test/simple.test.ts) for details.
+Hermes MongoDB accepts any MongoDB 5.0 or newer. The basic scenarios are tested in CI against all the versions above. See the [test suite](https://github.com/chassisjs/hermes/blob/main/packages/hermes-mongodb/test/simple.test.ts) for details.
 
 ## Comparison: MongoDB vs PostgreSQL
 
@@ -772,7 +587,7 @@ All versions are tested in CI. See the [test suite](https://github.com/arturwojn
 
 ## Related Resources
 
-- [Hermes MongoDB Package](https://github.com/arturwojnar/hermes/tree/main/packages/hermes-mongodb)
+- [Hermes MongoDB Package](https://github.com/chassisjs/hermes/tree/main/packages/hermes-mongodb)
 - [MongoDB Change Streams Documentation](https://www.mongodb.com/docs/manual/changeStreams/)
 - [MongoDB Oplog Documentation](https://www.mongodb.com/docs/manual/core/replica-set-oplog/)
 - [Outbox Pattern Overview](https://microservices.io/patterns/data/transactional-outbox.html)

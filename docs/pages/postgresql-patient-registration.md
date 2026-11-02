@@ -99,7 +99,7 @@ HTTP Request → Queue _AddUserToIdp Command
 
 ```typescript
 import { Command, Event, DefaultCommandMetadata } from '@event-driven-io/emmett'
-import { Uuid4String, NonEmptyString } from '@arturwojnar/hermes'
+import { Uuid4String, NonEmptyString } from '@chassisjs/hermes'
 
 type PatientId = Uuid4String<'PatientId'>
 type Subject = NonEmptyString<'Subject'>
@@ -158,7 +158,7 @@ type PatientRegistrationFailed = DomainEvent<
 The outbox consumer bridges PostgreSQL Logical Replication with your message handlers:
 
 ```typescript
-import { createOutboxConsumer, useBasicAsyncOutboxConsumerPolicy } from '@arturwojnar/hermes-postgresql'
+import { createOutboxConsumer, useBasicAsyncOutboxConsumerPolicy } from '@chassisjs/hermes-postgresql'
 
 const outbox = createOutboxConsumer<RegisterPatientCommand | RegisterPatientEvent>({
   getOptions() {
@@ -509,15 +509,15 @@ messageBus.handle(async ({ data, metadata }) => {
 
 Hermes uses PostgreSQL's **Logical Replication** protocol to stream changes from the Write-Ahead Log (WAL):
 
-1. **Replication Slot**: Hermes creates a named slot (e.g., `hermes_app`)
+1. **Replication Slot**: Hermes creates a slot named after the consumer and the partition (e.g., `hermes_slot_app_default`)
 2. **LSN Tracking**: The slot tracks the Log Sequence Number (LSN) of processed messages
-3. **Change Stream**: PostgreSQL streams INSERT/UPDATE/DELETE operations in real-time
+3. **Change Stream**: PostgreSQL streams the inserts into the outbox table in real-time
 4. **Acknowledgment**: Hermes acknowledges messages in order after successful processing
 
 **Key properties:**
 
 - **No polling**: Changes are pushed, not pulled
-- **Guaranteed ordering**: Messages are processed in commit order
+- **Ordering**: Messages arrive in commit order. With `serialization: true` they are also published in that order; by default they are published concurrently and only acknowledged in order
 - **No gaps**: Unlike auto-increment IDs, LSN is strictly sequential
 - **Restart safety**: Unacknowledged messages are redelivered after restart
 
@@ -650,11 +650,11 @@ Observe how Hermes retries the operation and eventually succeeds or triggers com
 
 For the full working example, see:
 
-[examples/postgresql/patient-registration/index.ts](https://github.com/arturwojnar/hermes/blob/main/examples/postgresql/patient-registration/index.ts)
+[examples/postgresql/patient-registration/index.ts](https://github.com/chassisjs/hermes/blob/main/examples/postgresql/patient-registration/index.ts)
 
 ## Advanced Topics
 
-### Custom Serialization
+### Sequential Processing
 
 By default, Hermes processes messages concurrently. To enforce sequential processing:
 
@@ -664,6 +664,21 @@ const outbox = createOutboxConsumer({
   serialization: true, // Process one message at a time
 })
 ```
+
+### Backpressure
+
+_Available since `1.0.0-alpha.19`._
+
+Hermes keeps the transactions waiting to be published or acknowledged in memory. When `maxQueueSize` of them pile up (`1000` by default), Hermes stops reading the replication stream, and PostgreSQL keeps the remaining changes in the WAL. Reading resumes once the queue drops to half the limit:
+
+```typescript
+const outbox = createOutboxConsumer({
+  // ...
+  maxQueueSize: 500,
+})
+```
+
+Without `serialization`, the same limit caps the number of concurrent `publish` calls. See [how it works](./postgresql/how-does-it-work.md#backpressure).
 
 ### Multiple Consumers with Different Partition Keys
 
@@ -701,15 +716,15 @@ FROM pg_replication_slots;
 **Monitor outbox table size:**
 
 ```sql
-SELECT COUNT(*) FROM hermes_outbox;
-SELECT COUNT(*) FROM hermes_async_outbox;
+SELECT COUNT(*) FROM "outbox";
+SELECT COUNT(*) FROM "asyncOutbox";
 ```
 
 ## Troubleshooting
 
-### "Replication slot already exists"
+### `HermesConsumerAlreadyTakenError`
 
-This means another Hermes instance is using the same `consumerName`. Either:
+This means another Hermes instance is using the same `consumerName` and `partitionKey`. Either:
 
 - Stop the other instance
 - Use a different `consumerName`
@@ -733,9 +748,13 @@ PostgreSQL retains WAL segments for unacknowledged messages. If consumption is s
 3. Use async outbox for non-critical messages
 4. Consider partitioning by tenant or domain
 
+### High memory usage
+
+Messages that cannot be published yet wait in memory, up to `maxQueueSize` transactions. Lower `maxQueueSize` if a single transaction carries many or large messages. The rest stays in the WAL (see [High disk usage](#high-disk-usage)).
+
 ## Related Resources
 
-- [Hermes PostgreSQL README](https://github.com/arturwojnar/hermes/tree/main/packages/hermes-postgresql)
+- [Hermes PostgreSQL README](https://github.com/chassisjs/hermes/tree/main/packages/hermes-postgresql)
 - [PostgreSQL Logical Replication Documentation](https://www.postgresql.org/docs/current/logical-replication.html)
 - [Outbox Pattern Explained](https://www.knowhowcode.dev/articles/outbox/)
 - [Microservices.io: Transactional Outbox](https://microservices.io/patterns/data/transactional-outbox.html)

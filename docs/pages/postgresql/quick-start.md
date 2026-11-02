@@ -28,7 +28,7 @@ services:
       - "wal_level=logical"
 ```
 
-You can also change the maximum number of [replication slots](./limitations.md) when you will be working on many partitions or Hermes PostgreSQL instantions.
+You can also change the maximum number of [replication slots](./limitations.md) when you will be working on many partitions or Hermes PostgreSQL instances.
 
 ```bash
 command:
@@ -91,12 +91,14 @@ yarn add @chassisjs/hermes @chassisjs/hermes-postgresql
 
 ## Good to know
 
-One instnace of Hermes PostgreSQL, pointed by the _consumerName_ parameter equals one [replication slot](./how-does-it-work.md).
+One instance of Hermes PostgreSQL, identified by the _consumerName_ and _partitionKey_ parameters, equals one [replication slot](./how-does-it-work.md).
 
-It means that the instnace of your app which created the consumer will receive all messages related to this consumer and its _partition_.
+It means that the instance of your app which created the consumer will receive all messages related to this consumer and its _partition_.
 
-When you try to create another consumer of _the same name_ and with the same partition's name, you get an error rooted in _PostgreSQL Logical Replication_.
+When you try to start another consumer of _the same name_ and with the same partition's name, you get the `HermesConsumerAlreadyTakenError` error, rooted in _PostgreSQL Logical Replication_.
 
 It's a beautiful native mechanism that does a job for you of taking care of instantiating of exactly one consumer of given name.
 
-You can use it to take advantage of the fact that no other instnace executes this code.
+You can use it to take advantage of the fact that no other instance executes this code.
+
+Next, see the [basic usage](./basic-usage.md).

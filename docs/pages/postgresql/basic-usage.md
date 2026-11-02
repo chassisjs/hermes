@@ -5,15 +5,10 @@
 
 The classic use case for the Hermes and Outbox pattern itself is saving data in a database and publishing an event, so that we are sure the two happen within one transaction and that the event will be eventually published.
 
-First create an instnace of the Hermes PostgreSQL 👇
+First create an instance of the Hermes PostgreSQL 👇
 
 ```typescript
-import {
-  type HermesMessageEnvelope,
-  type MessageEnvelope,
-  createOutboxConsumer,
-  useBasicAsyncOutboxConsumerPolicy,
-} from '@chassisjs/hermes-postgresql'
+import { type MessageEnvelope, createOutboxConsumer } from '@chassisjs/hermes-postgresql'
 
 const hermes = createOutboxConsumer<RegisterPatientCommand | RegisterPatientEvent>({
   getOptions() {
@@ -45,11 +40,11 @@ export { hermes }
 Then, start the Hermes PostgreSQL 👇
 
 ```typescript
-// Running this for the second time will fail.
-await outbox.start()
+// Starting a second consumer of the same name and partition fails with `HermesConsumerAlreadyTakenError`.
+const stop = await hermes.start()
 ```
 
-The cleanup will be done automatically on _SIGTERM_.
+Call the returned `stop` function when your app shuts down (e.g. on _SIGTERM_). It lets the message being published finish and closes the connections.
 
 After that, you can use your Hermes 👇
 
@@ -57,11 +52,11 @@ After that, you can use your Hermes 👇
 await sql.begin(async (sql) => {
   await sql`
     insert into users
-      (name, age)
+      (name, surname)
     values
       ('Max', 'Payne')
   `
-  const patientRegisterdEvent: MessageEnvelope<SomeEvent> = {
+  const patientRegisteredEvent: MessageEnvelope<SomeEvent> = {
     message: {
       kind: 'event',
       type: 'SomeEvent',
@@ -72,6 +67,6 @@ await sql.begin(async (sql) => {
   }
 
   // Passing the transaction 👇
-  await hermes.queue(patientRegisterdEvent, { tx: sql })
+  await hermes.queue(patientRegisteredEvent, { tx: sql })
 })
 ```

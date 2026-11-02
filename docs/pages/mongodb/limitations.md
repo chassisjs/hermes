@@ -3,7 +3,7 @@
 
 # Limitations
 
-MongoDB's oplog (operations log) has time/size-based retention limits. If messages remain unconsumed longer than the oplog retention window, they cannot be recovered.
+MongoDB's oplog (operations log) has time/size-based retention limits. If messages remain unconsumed longer than the oplog retention window, Hermes cannot stream them anymore. They stay in the `__outboxMessages` collection, but you have to replay them on your own.
 
 ## Explanation
 
@@ -12,7 +12,7 @@ The oplog is a **capped collection** that stores an ordered history of all write
 1. **Size limit**: The oplog has a maximum size (configurable, typically gigabytes)
 2. **Time window**: Older entries are automatically removed when the oplog reaches capacity
 
-If the Hermes MongoDB consumer (outbox processor) is **down or unable to process messages** for longer than the oplog retention window, those messages will be lost because:
+If the Hermes MongoDB consumer (outbox processor) is **down or unable to process messages** for longer than the oplog retention window, those messages will not be published because:
 
 ➡️ The oplog rolls over and removes old entries when it reaches its size limit
 
@@ -83,8 +83,8 @@ async function checkOplogHealth() {
   const replSetStatus = await admin.command({ replSetGetStatus: 1 })
 
   // Calculate oplog lag
-  const local = db.getSiblingDB('local')
-  const oplogStats = await local.oplog.rs.stats()
+  const local = client.db('local')
+  const oplogStats = await local.command({ collStats: 'oplog.rs' })
 
   const oplogSizeMB = oplogStats.maxSize / (1024 * 1024)
   const oplogUsedMB = oplogStats.size / (1024 * 1024)
@@ -96,11 +96,13 @@ async function checkOplogHealth() {
   }
 
   // Calculate time window
-  const firstEntry = await local.oplog.rs.find().sort({ $natural: 1 }).limit(1).toArray()
-  const lastEntry = await local.oplog.rs.find().sort({ $natural: -1 }).limit(1).toArray()
+  const oplog = local.collection('oplog.rs')
+  const firstEntry = await oplog.find().sort({ $natural: 1 }).limit(1).toArray()
+  const lastEntry = await oplog.find().sort({ $natural: -1 }).limit(1).toArray()
 
   if (firstEntry.length && lastEntry.length) {
-    const windowHours = (lastEntry[0].ts.getTime() - firstEntry[0].ts.getTime()) / 3600
+    // `ts` is a BSON Timestamp; its high bits are seconds since the epoch
+    const windowHours = (lastEntry[0].ts.getHighBits() - firstEntry[0].ts.getHighBits()) / 3600
 
     // Alert if window is too small
     if (windowHours < 24) {
@@ -155,8 +157,9 @@ Track how far behind consumers are:
 
 ```typescript
 publish: async (event) => {
-  // Measure lag between event creation and processing
-  const lagMs = Date.now() - event.occurredAt.getTime()
+  // Measure lag between event creation and processing.
+  // Hermes passes only your event, so put the creation time into it.
+  const lagMs = Date.now() - event.createdAt.getTime()
 
   metrics.recordLag(lagMs)
 
@@ -176,8 +179,9 @@ If your consumer's resume token points to an expired oplog entry:
 
 **What happens:**
 
-- Change Streams will throw an error indicating the resume token is no longer valid
-- The consumer cannot automatically resume
+- The Change Stream fails with an error indicating the resume token is no longer valid
+- `start()` does not throw. The error is passed to `onDbError`, and Hermes keeps retrying every `waitAfterFailedPublishMs`
+- The consumer cannot automatically resume, so handle this error in `onDbError`
 
 **Recovery options:**
 
@@ -185,7 +189,7 @@ If your consumer's resume token points to an expired oplog entry:
 
 ```typescript
 // Manually clear the consumer's resume token to start fresh
-await db.collection('hermes_consumers').deleteOne({
+await db.collection('__outboxConsumers').deleteOne({
   partitionKey: 'your-partition-key',
 })
 
@@ -213,7 +217,7 @@ Then you can query for unsent messages:
 ```typescript
 // Find messages that were never sent
 const unsentMessages = await db
-  .collection('hermes_outbox')
+  .collection('__outboxMessages')
   .find({
     partitionKey: 'your-partition-key',
     sentAt: { $exists: false },
@@ -224,13 +228,9 @@ const unsentMessages = await db
 // Manually replay them
 for (const message of unsentMessages) {
   await publishHandler(message.data)
-  await db.collection('hermes_outbox').updateOne({ _id: message._id }, { $set: { sentAt: new Date() } })
+  await db.collection('__outboxMessages').updateOne({ _id: message._id }, { $set: { sentAt: new Date() } })
 }
 ```
-
-### Option 3: Use Change Streams with `fullDocumentBeforeChange`
-
-For critical scenarios, consider storing outbox entries with additional metadata to enable manual recovery.
 
 ## MongoDB vs PostgreSQL: Retention Comparison
 

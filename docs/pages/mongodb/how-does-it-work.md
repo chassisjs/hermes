@@ -7,11 +7,11 @@ Simple! 😌
 
 ## TL;DR
 
-- Hermes MongoDB is implementation of the **Outbox pattern** in **NodeJS**/**TypeScript** environment.
+- Hermes MongoDB is an implementation of the **Outbox pattern** in **NodeJS**/**TypeScript** environment.
 
-- **Save data in the database and publish messages in one reliable logical unit. You won't lose anything.**
+- **Save data in the database and publish messages in one reliable logical unit.** Keep the consumer running within the oplog retention window (see [limitations](./limitations.md)).
 
-- God Hermes finds a love interest in the native [MongoDB Node.js Driver](https://www.mongodb.com/docs/drivers/node/) which is its tool for talking to MongoDB and managing connections. You can also pass your own connection.
+- God Hermes finds a love interest in the native [MongoDB Node.js Driver](https://www.mongodb.com/docs/drivers/node/) which is its tool for talking to MongoDB. You pass your own `MongoClient` and `Db`.
 
 - Hermes MongoDB follows the "**Log First!**" paradigm by working on MongoDB's **Change Streams**.
 
@@ -53,7 +53,7 @@ While both implement the Outbox pattern reliably, there are important infrastruc
 
 - Based on the **oplog** (operations log)
 - Oplog has limited retention (configurable, typically hours to days)
-- Hermes tracks resume tokens to recover from any point
+- Hermes tracks resume tokens to recover from any point that is still in the oplog
 - **Operational consideration**: If consumer is down longer than oplog retention, you need to ensure oplog is sized appropriately
 - Requires MongoDB to run as a replica set
 - Simpler setup and configuration
@@ -75,23 +75,19 @@ While both implement the Outbox pattern reliably, there are important infrastruc
 
 ➡️ The app sends messages (events, commands) to Hermes MongoDB
 
-➡️ Hermes MongoDB stores these messages in a special collection, in a dedicated Outbox collection
+➡️ Hermes MongoDB stores these messages in a dedicated Outbox collection (`__outboxMessages`), along with your data, in one transaction
 
-➡️ Messages are ordered with an autoincremented sequence number
+➡️ All messages are logged in MongoDB's oplog, in the order of their commits
 
-➡️ All messages are logged in MongoDB's oplog
+➡️ Hermes reads the inserts of its partition from a Change Stream, one message at a time
 
-➡️ So far, only the first message has been acknowledged. _Acknowledged by our subscriber. We assume there is only one subscriber for the sake of simplicity_
+➡️ For each message, Hermes calls the application callback (`publish`) and waits until it finishes
 
-➡️ Change Streams mechanism publishes new messages to Hermes MongoDB, here called _Outbox Processor_
+➡️ When the callback finishes without an error, Hermes saves the message's resume token in the `__outboxConsumers` collection. This is the acknowledgment: after a restart, Hermes resumes after that message
 
-➡️ Hermes has an in-memory _internal queue_ that keeps incoming, not acknowledged messages
+➡️ Only then Hermes fetches the next message. So messages are published strictly one by one and in order, and there is no in-memory queue to grow
 
-➡️ After receiving new messages, Hermes calls application callbacks for these messages, in appropriate order
-
-➡️ Hermes waits for the application to process the second message before it acknowledges it. Despite the fact that callbacks for the third or fourth message can finish first, Hermes cannot acknowledge them before the second message. Because in case of an outage, Change Streams would resume on the third/fourth message instead of the second message
-
-➡️ When the application callback finishes without an error, then its corresponding message is considered processed and Hermes can treat it as acknowledged
+➡️ When the callback throws, Hermes calls `onFailedPublish` and tries again after `waitAfterFailedPublishMs` (1 second by default), with no limit of attempts. The following messages of the partition wait until it succeeds
 
 ## Key Features
 
@@ -121,7 +117,7 @@ Unlike polling-based solutions, Hermes MongoDB receives events in real-time thro
 
 Hermes MongoDB guarantees that events are delivered at least once:
 
-- Events are retried on failure
+- Events are retried on failure, with no limit of attempts
 - Resume tokens allow recovery from disconnections
 - Your event handlers should be idempotent
 
@@ -130,7 +126,7 @@ Hermes MongoDB guarantees that events are delivered at least once:
 Events are always processed in the order they were created:
 
 - Per partition, events maintain strict ordering
-- Hermes won't acknowledge event N+1 until event N is processed
+- Hermes doesn't even fetch event N+1 until event N is published and acknowledged
 - Prevents out-of-order processing in distributed systems
 
 ## Partitioning for Horizontal Scaling
@@ -155,7 +151,7 @@ const outbox2 = createOutboxConsumer({
 })
 ```
 
-Each partition can be processed by a separate instance, allowing you to scale based on your needs.
+Each partition can be processed by a separate instance, allowing you to scale based on your needs. Run exactly one instance per partition: Hermes MongoDB does not prevent two instances of the same partition from running, and both would publish the same events.
 
 ## Important Considerations
 
@@ -174,23 +170,23 @@ Change Streams require MongoDB to run as a replica set:
 
 - Even in development, you need a replica set (can be single-node)
 - Use Docker or docker-compose to easily set up replica sets
-- AWS DocumentDB and MongoDB Atlas support Change Streams out of the box
+- AWS DocumentDB and MongoDB Atlas support Change Streams; Hermes MongoDB requires version 5.0 or newer
 
 ### Idempotency
 
-Since Hermes guarantees **at-least-once delivery**, your event handlers may be called multiple times for the same event:
+Since Hermes guarantees **at-least-once delivery**, your event handlers may be called multiple times for the same event. Hermes passes only your event to `publish`, so put an identifier into the event itself:
 
 ```typescript
 publish: async (event) => {
   // Check if already processed
-  const processed = await checkIfProcessed(event.messageId)
+  const processed = await checkIfProcessed(event.eventId)
   if (processed) return // Safe to skip
 
   // Process the event
   await handleEvent(event)
 
   // Mark as processed
-  await markAsProcessed(event.messageId)
+  await markAsProcessed(event.eventId)
 }
 ```
 

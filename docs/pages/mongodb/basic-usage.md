@@ -43,7 +43,7 @@ const mongoUri = 'mongodb://localhost:27017/?directConnection=true'
 
 ### AWS DocumentDB
 
-When it comes to [AWS DocumentDB](https://aws.amazon.com/documentdb/), Change Streams are supported out of the box (DocumentDB 4.0+):
+When it comes to [AWS DocumentDB](https://aws.amazon.com/documentdb/), Change Streams are supported (DocumentDB 5.0+, Hermes MongoDB requires version 5 or newer):
 
 ```typescript
 import { MongoClient } from 'mongodb'
@@ -67,7 +67,7 @@ const cluster = new docdb.DatabaseCluster(this, 'DocumentDBCluster', {
   masterUser: {
     username: 'hermes',
   },
-  engineVersion: '4.0.0', // 👈 Change Streams require 4.0+
+  engineVersion: '5.0.0', // 👈 Hermes MongoDB requires 5.0+
 })
 ```
 
@@ -140,8 +140,8 @@ const outbox = createOutboxConsumer<UserEvent>({
   },
 })
 
-// 4. Start the consumer
-outbox.start()
+// 4. Start the consumer (it throws for MongoDB older than 5.0)
+const stop = await outbox.start()
 
 // 5. Publish events with transactions
 async function registerUser(email: string) {
@@ -168,22 +168,9 @@ async function registerUser(email: string) {
 
 ## Key Concepts
 
-### Consumer Name
+### One Instance per Partition
 
-Each outbox consumer has a unique name. This prevents multiple consumers from competing:
-
-```typescript
-const outbox = createOutboxConsumer<UserEvent>({
-  client,
-  db,
-  publish,
-  consumerName: 'user-service', // 👈 Unique consumer identifier
-})
-```
-
-Only one consumer with the same name can run at a time. If you try to start another consumer with the same name, MongoDB will prevent it.
-
-This is a beautiful native mechanism that ensures exactly-one consumer of a given name is processing events.
+Run exactly one instance of the outbox consumer per partition key. Hermes MongoDB does not prevent a second instance of the same partition from running, and both would publish the same events. Use a lock (e.g. [an exclusive subscription in Apache Pulsar](/pages/pulsar.md)) when you run many replicas of your app.
 
 ### Partition Keys
 
@@ -206,24 +193,15 @@ const outbox2 = createOutboxConsumer<UserEvent>({
   partitionKey: 'tenant-b', // 👈
 })
 
-outbox1.start()
-outbox2.start()
+await outbox1.start()
+await outbox2.start()
 ```
 
 Each partition is processed independently, allowing you to scale based on your needs.
 
-### Custom Collection Names
+### Collections
 
-By default, Hermes creates a collection named `hermes_outbox`. You can customize this:
-
-```typescript
-const outbox = createOutboxConsumer<UserEvent>({
-  client,
-  db,
-  publish,
-  collectionName: 'my_custom_outbox', // 👈
-})
-```
+Hermes stores the events in the `__outboxMessages` collection and the consumers' positions in the `__outboxConsumers` collection. The names are fixed.
 
 ### Publishing Events
 
@@ -258,13 +236,13 @@ Both approaches guarantee atomicity. Choose based on your needs:
 
 ### Make Handlers Idempotent
 
-Since Hermes guarantees **at-least-once delivery**, your handlers may be called multiple times:
+Since Hermes guarantees **at-least-once delivery**, your handlers may be called multiple times. Hermes passes only your event to `publish`, so put an identifier into the event itself:
 
 ```typescript
 publish: async (event) => {
   // Check if already processed
   const existing = await db.collection('processed_events').findOne({
-    eventId: event.messageId,
+    eventId: event.eventId,
   })
 
   if (existing) {
@@ -277,7 +255,7 @@ publish: async (event) => {
 
   // Mark as processed
   await db.collection('processed_events').insertOne({
-    eventId: event.messageId,
+    eventId: event.eventId,
     processedAt: new Date(),
   })
 }
@@ -285,7 +263,7 @@ publish: async (event) => {
 
 ### Handle Errors Properly
 
-Only throw errors when you want the event to be retried:
+Only throw errors when you want the event to be retried. Hermes retries it every `waitAfterFailedPublishMs` (1 second by default) with no limit, and the following events of the partition wait until it succeeds:
 
 ```typescript
 publish: async (event) => {
@@ -327,14 +305,16 @@ publish: async (event) => {
 
 ## Graceful Shutdown
 
-Always clean up resources when shutting down:
+By default, Hermes stops the consumer on `SIGTERM` and `SIGINT`. If you set `shouldDisposeOnSigterm: false`, clean up on your own:
 
 ```typescript
+const stop = await outbox.start()
+
 const cleanup = async () => {
   console.log('Shutting down gracefully...')
 
   // Stop the outbox consumer
-  outbox.stop()
+  await stop()
 
   // Close MongoDB connection
   await client.close()
@@ -351,18 +331,20 @@ process.on('SIGTERM', cleanup)
 Here are all available configuration options for `createOutboxConsumer`:
 
 ```typescript
-interface OutboxConsumerConfig<T> {
+type ConsumerCreationParams<Event> = {
   // Required
   client: MongoClient // MongoDB client instance
   db: Db // Database instance
-  publish: (event: T) => Promise<void> // Event handler callback
+  publish: (event: Event) => Promise<void> // Event handler callback, has to throw on failure
 
   // Optional
-  consumerName?: string // Unique consumer identifier (default: 'default')
-  collectionName?: string // Outbox collection name (default: 'hermes_outbox')
-  partitionKey?: string // Partition key for scaling (default: undefined)
-  batchSize?: number // Number of events to process in parallel (default: 10)
-  pollInterval?: number // Polling interval in ms for recovery (default: 5000)
+  partitionKey?: string // Partition key for scaling (default: 'default')
+  waitAfterFailedPublishMs?: number // Delay before retrying a failed publish (default: 1000)
+  shouldDisposeOnSigterm?: boolean // Stop the consumer on SIGTERM/SIGINT (default: true)
+  saveTimestamps?: boolean // Save `sentAt` on every sent event; adds a write per event (default: false)
+  onFailedPublish?: (error: unknown) => void // Called on every failed publish
+  onDbError?: (error: unknown) => void // Called on change stream/database errors
+  now?: () => Date // Clock used for timestamps (default: () => new Date())
 }
 ```
 
@@ -395,7 +377,7 @@ db.oplog.rs.find().sort({$natural: 1}).limit(1).forEach(first => {
 Monitor key metrics:
 
 ```typescript
-// Track lag between event creation and processing
+// Track lag between event creation and processing (put `createdAt` into your event)
 const lag = Date.now() - event.createdAt.getTime()
 metrics.recordEventLag(lag)
 
@@ -441,7 +423,7 @@ mongosh --eval "rs.initiate()"
 **Check:**
 
 1. Is MongoDB running as a replica set? (`rs.status()`)
-2. Is the outbox consumer started? (`outbox.start()`)
+2. Is the outbox consumer started? (`await outbox.start()`)
 3. Are there errors in the `publish` callback?
 4. Check MongoDB logs for Change Stream errors
 
@@ -456,18 +438,17 @@ mongosh --eval "rs.initiate()"
 
 ### High memory usage
 
+Hermes MongoDB takes one event at a time from the change stream and fetches the next one only after the previous one is published, so slow publishing does not pile events up in memory. They wait in the `__outboxMessages` collection instead.
+
 **Causes:**
 
-- Change Stream buffering too many events
-- Slow event processing
 - Large event payloads
+- Memory used by your `publish` callback
 
 **Solutions:**
 
-- Optimize event handlers for performance
 - Reduce event payload size
 - Scale horizontally with partition keys
-- Adjust `batchSize` configuration
 
 ## Production Checklist
 

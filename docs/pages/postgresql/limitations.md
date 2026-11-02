@@ -19,6 +19,8 @@ As the Logical Replication is the foundation of the Hermes PostgreSQL, its limit
 
 Also, the PostgreSQL team works hard on the following releases, and each new release brings some nice improvements in the future.
 
+A consumer that cannot publish (e.g. the message broker is down) stops reading the stream once its queue is full (see [backpressure](./how-does-it-work.md#backpressure)), so its slot holds the WAL until publishing works again. Watch the replication lag and the free disk space.
+
 ## How can we manage the limitation?
 
 ➡️ We can achieve scaling of message delivery by **partitioning** (each partition is a separate Replication Slot)
@@ -35,13 +37,13 @@ Look at the picture below 👇
 
 ![WAL](../../public/postgresql/gap.png)
 
-The auto-increment primary key's value is figured out before a transaction starts.
+The auto-increment primary key's value is assigned when a row is inserted, not when its transaction commits.
 That is why it is possible that during the Δt, there will be only rows of identifiers one and three.
 When transaction two is finished, the "gap" will be fulfilled.
 
 Don't worry. Thanks to Logical Replication, Hermes will pull out the second message, but there is one consequence.
 
-Hemres PostgreSQL will process transactions one and three, and later transaction two.
+Hermes PostgreSQL will process transactions one and three, and later transaction two, because Logical Replication streams transactions in the commit order.
 
 So, this will be done out of order.
 

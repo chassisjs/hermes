@@ -9,9 +9,9 @@ Simple! 😌
 
 - Hermes PostgreSQL is implementation of the **Outbox pattern** in **NodeJS**/**TypeScript** environment.
 
-- **Save data in the database and publish messages in one reliable logical unit. You won't loose anything.**
+- **Save data in the database and publish messages in one reliable logical unit. You won't lose anything.**
 
-- God Hermes finds a love interest in [Postgres.js](https://github.com/porsager/postgres) which is its tool for talking to PostgreSQL and to manage the connection pool. You can also pass your own connection.
+- God Hermes finds a love interest in [Postgres.js](https://github.com/porsager/postgres) which is its tool for talking to PostgreSQL and to manage the connection pool. You pass the connection options via `getOptions`.
 
 - Hermes PostgreSQL follows the "**Log First!**" paradigm by working on the database's **Write-Ahead Log** (WAL).
 
@@ -63,9 +63,9 @@ Look at the diagram below to track down how things work internally in Hermes Pos
 
 ➡️ The app sends messages (events, commands) to Hermes PostgreSQL
 
-➡️ Hermes PostgreSQL stores these messages in a special residental database structure, in a dedicated Outbox table
+➡️ Hermes PostgreSQL stores these messages in a dedicated Outbox table
 
-➡️ Messages are ordered with the autoincremented primary key
+➡️ Messages come in the order their transactions were committed (see [out of order delivery](./limitations.md#out-of-order-delivery))
 
 ➡️ All messages are logged in the PostgreSQL's WAL
 
@@ -73,10 +73,45 @@ Look at the diagram below to track down how things work internally in Hermes Pos
 
 ➡️ Logical Replication's mechanism of WAL publishes new messages to Hermes PostgreSQL, here called _Outbox Processor_
 
-➡️ Hermes has an in-memory _internal qeueue_ that keeps incoming, not acknoledged messages
+➡️ Hermes has an in-memory _internal queue_ that keeps incoming, not acknowledged messages
 
 ➡️ After receiving new messages, Hermes calls application callbacks for these messages, in appropriate order
 
-➡️ Hermes waits for the application to process the second message before it acknowledges it to PostgreSQL's Logical Replication. Despite the fact, the callbacks for the thrid or fourth message can be finished first, Hermes cannot acknowledge them before the second message. Because in case of an outage, Logical Replication would resume on thrid/fourth message instead the second message
+➡️ Hermes waits for the application to process the second message before it acknowledges it to PostgreSQL's Logical Replication. Despite the fact, the callbacks for the third or fourth message can be finished first, Hermes cannot acknowledge them before the second message. Because in case of an outage, Logical Replication would resume on the third/fourth message instead of the second message
 
 ➡️ When the application callback is finished without an error, then it is considered as its corresponding message has been processed and Hermes can treat it as acknowledged
+
+➡️ When the callback throws, Hermes tries again after `waitAfterFailedPublish` (30 seconds by default). There is no limit of attempts; use `redeliveryCount` from the message envelope to give up on a message in your callback
+
+## Publishing modes
+
+By default (`serialization: false`), Hermes calls your callback for every incoming transaction right away, so many messages can be published at the same time and finish in any order. Only the acknowledgments are kept in order.
+
+With `serialization: true`, Hermes publishes one transaction at a time, in the commit order. A failing message blocks the next ones until it is delivered.
+
+## Backpressure
+
+_Available since `1.0.0-alpha.19`._
+
+The internal queue lives in memory. If your callback is slower than the incoming changes, e.g. because the message broker is down, the queue would keep growing.
+
+That is why Hermes limits it with the `maxQueueSize` option (`1000` transactions by default):
+
+```typescript
+const hermes = createOutboxConsumer({
+  // ...
+  maxQueueSize: 500,
+})
+```
+
+➡️ When the queue holds `maxQueueSize` transactions waiting to be published or acknowledged, Hermes stops reading the replication stream
+
+➡️ It is not only a pause in Hermes. The connection stops reading from the socket, so PostgreSQL stops sending the WAL and keeps it on its side. Nothing is lost, the messages wait in the WAL instead of the memory of your app
+
+➡️ Hermes resumes reading when the queue drops to half the limit
+
+➡️ With `serialization: false`, the limit also caps how many callbacks run at the same time, so a flood of changes does not turn into a flood of requests to your message broker
+
+➡️ While paused, Hermes still sends its status to PostgreSQL every 10 seconds. Otherwise, PostgreSQL would close the connection after [`wal_sender_timeout`](https://www.postgresql.org/docs/current/runtime-config-replication.html#GUC-WAL-SENDER-TIMEOUT) (60 seconds by default). Keep `wal_sender_timeout` above 10 seconds
+
+The WAL retained by a paused consumer takes disk space, the same way as for a consumer that is down. See the [limitations](./limitations.md).

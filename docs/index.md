@@ -24,7 +24,7 @@ features:
   - title: Optimized for large-scale 🚀
     details: By default, Hermes updates only the consumer to keep track of the last processed event. You can also use partition keys to scale out your application.
   - title: Message broker-agnostic 🔌
-    details: ou can plug in whatever you want — a cloud-native solution, Apache Pulsar, RabbitMQ, etc.
+    details: You can plug in whatever you want — a cloud-native solution, Apache Pulsar, RabbitMQ, etc.
   - title: Rely on PostgreSQL Logical Replication and MongoDB's Change Streams 🍃
     details: Hermes leverages native database mechanisms to avoid long-polling — and the performance ramps up! 💪
   - title: Fully covered by tests 📑
