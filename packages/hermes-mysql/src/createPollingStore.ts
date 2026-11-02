@@ -40,7 +40,11 @@ const microseconds = (duration: Duration) => Math.round(duration.ms * 1000)
  * messages with plain `SELECT`s: in MySQL, a subquery of `INSERT ... SELECT` or `DELETE` locks the rows it reads, so it
  * would wait for the open transactions of the application. It does it before the claim, in other statements, so it
  * does not hold the locks of the partitions while it claims them. The next poll adds a removed partition again when
- * it gets new messages, so a message that commits during the removal is not lost.
+ * it gets new messages, so a message that commits during the removal is not lost. Every statement that changes rows
+ * runs in a `READ COMMITTED` transaction, which locks only the rows it changes, not the gaps between them.
+ *
+ * `markFailed` changes a message only when `owner` still has the claim of the message, or of its partition when the
+ * message itself is not claimed (`usePartitionOrderingPolicy`).
  *
  * @param getPool - Returns the `mysql2` pool
  * @param scope - The consumer and, optionally, the partition whose messages the store reads
@@ -85,8 +89,19 @@ const createPollingStore = <Message>(
              \`claimed_until\` = NULL
          WHERE \`position\` = ?
            AND \`delivered_at\` IS NULL
-           AND (\`claimed_by\` IS NULL OR \`claimed_by\` = ?)`,
-        [microseconds(retryAfter), message.id, owner],
+           AND (
+             \`claimed_by\` = ?
+             OR (
+               \`claimed_by\` IS NULL
+               AND EXISTS (
+                 SELECT 1 FROM \`${PartitionTable}\` p
+                 WHERE p.\`consumer_name\` = \`${OutboxTable}\`.\`consumer_name\`
+                   AND p.\`partition_key\` = \`${OutboxTable}\`.\`partition_key\`
+                   AND p.\`claimed_by\` = ?
+               )
+             )
+           )`,
+        [microseconds(retryAfter), message.id, owner, owner],
       )
     },
 
@@ -168,24 +183,29 @@ const createPollingStore = <Message>(
       )
       const pendingKeys = new Set(pending.map((row) => String(row.partition_key)))
       const registeredKeys = new Set(registered.map((row) => String(row.partition_key)))
-      const missing = [...pendingKeys].filter((key) => !registeredKeys.has(key))
+      const missing = [...pendingKeys].filter((key) => !registeredKeys.has(key)).sort()
       const empty = registered
         .filter((row) => Number(row.is_free) === 1 && !pendingKeys.has(String(row.partition_key)))
         .map((row) => String(row.partition_key))
+        .sort()
 
       if (missing.length) {
-        await pool.query(`INSERT IGNORE INTO \`${PartitionTable}\` (\`consumer_name\`, \`partition_key\`) VALUES ?`, [
-          missing.map((key) => [consumerName, key]),
-        ])
+        await inTransaction(pool, (connection) =>
+          connection.query(`INSERT IGNORE INTO \`${PartitionTable}\` (\`consumer_name\`, \`partition_key\`) VALUES ?`, [
+            missing.map((key) => [consumerName, key]),
+          ]),
+        )
       }
 
       if (empty.length) {
-        await pool.query(
-          `DELETE FROM \`${PartitionTable}\`
-           WHERE \`consumer_name\` = ?
-             AND \`partition_key\` IN (?)
-             AND (\`claimed_until\` IS NULL OR \`claimed_until\` < NOW(6))`,
-          [consumerName, empty],
+        await inTransaction(pool, (connection) =>
+          connection.query(
+            `DELETE FROM \`${PartitionTable}\`
+             WHERE \`consumer_name\` = ?
+               AND \`partition_key\` IN (?)
+               AND (\`claimed_until\` IS NULL OR \`claimed_until\` < NOW(6))`,
+            [consumerName, empty],
+          ),
         )
       }
 

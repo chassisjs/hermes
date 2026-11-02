@@ -429,7 +429,7 @@ describe('Review fixes', () => {
     })
   })
 
-  test('partition keys and consumer names are case and accent sensitive', async () => {
+  test('partition keys and consumer names are compared byte by byte', async () => {
     await mysql.withDatabase(async ({ options, pool }) => {
       const published: string[] = []
       const outbox = createConsumer(options, ({ messageId, partitionKey }) => {
@@ -440,11 +440,12 @@ describe('Review fixes', () => {
       await outbox.queue(envelope('1'), { partitionKey: 'Tenant-A' })
       await outbox.queue(envelope('2'), { partitionKey: 'tenant-a' })
       await outbox.queue(envelope('3'), { partitionKey: 'tenant-á' })
+      await outbox.queue(envelope('4'), { partitionKey: 'tenant-a ' })
 
-      await waitUntil(() => published.length === 3)
+      await waitUntil(() => published.length === 4)
       await stop()
 
-      expect([...published].sort()).toEqual(['Tenant-A:1', 'tenant-a:2', 'tenant-á:3'])
+      expect([...published].sort()).toEqual(['Tenant-A:1', 'tenant-a :4', 'tenant-a:2', 'tenant-á:3'])
       expect(
         await select(pool, "SELECT COUNT(*) AS count FROM `hermes_outbox` WHERE `partition_key` = 'tenant-a'"),
       ).toEqual([{ count: '1' }])
@@ -541,6 +542,49 @@ describe('Review fixes', () => {
       expect(
         await select(pool, 'SELECT `claimed_by` FROM `hermes_outbox_partition` WHERE `claimed_by` IS NOT NULL'),
       ).toEqual([])
+
+      await outbox.getDbConnection().end()
+    })
+  })
+
+  test('a failed start keeps the pool that the application already uses', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const outbox = createConsumer(options, () => {})
+      const ownPool = outbox.getDbConnection()
+
+      await pool.query('CREATE VIEW `hermes_migrations` AS SELECT 1 AS `other`')
+
+      await expect(outbox.start()).rejects.toThrow(/Unknown column/)
+
+      expect(await ownPool.query('SELECT 1 AS `one`').then(([rows]) => rows)).toEqual([{ one: '1' }])
+
+      await ownPool.end()
+    })
+  })
+
+  test('with partition ordering, a failure reported by an instance that lost the partition is ignored', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const outbox = createConsumer(options, () => {})
+      const store = createPollingStore<Event>(() => pool, { consumerName: 'app' })
+
+      await migrate(pool)
+      await outbox.queue(envelope('m1'))
+
+      expect(await store.claimPartitions({ owner: 'second', lease: Duration.ofSeconds(30), limit: 10 })).toEqual([
+        'default',
+      ])
+
+      const [message] = await store.readPartition({ partitionKey: 'default', limit: 1 })
+
+      await store.markFailed(message, { retryAfter: Duration.ofSeconds(1), owner: 'first' })
+
+      expect(await select(pool, 'SELECT `attempts`, `next_attempt_at` FROM `hermes_outbox`')).toEqual([
+        { attempts: 0, next_attempt_at: null },
+      ])
+
+      await store.markFailed(message, { retryAfter: Duration.ofSeconds(1), owner: 'second' })
+
+      expect(await select(pool, 'SELECT `attempts` FROM `hermes_outbox`')).toEqual([{ attempts: 1 }])
 
       await outbox.getDbConnection().end()
     })

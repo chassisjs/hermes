@@ -67,13 +67,19 @@ const createOutboxConsumer = <Message extends JSONValue>(
 
       isStarted = true
 
+      const hadPool = pool !== null
+
       try {
         if (params.migrate !== false) {
           await migrate(getPool())
         }
       } catch (error) {
         isStarted = false
-        await closePool().catch(() => {})
+
+        if (!hadPool) {
+          await closePool().catch(() => {})
+        }
+
         throw error
       }
 
@@ -105,9 +111,12 @@ const createOutboxConsumer = <Message extends JSONValue>(
 
       return () => {
         stopping ??= (async () => {
-          await stopPolling()
-          await closePool()
-          isStarted = false
+          try {
+            await stopPolling()
+            await closePool()
+          } finally {
+            isStarted = false
+          }
         })()
 
         return stopping
