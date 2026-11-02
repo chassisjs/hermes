@@ -1,4 +1,4 @@
-import { CancellationPromise, Duration } from '@chassisjs/hermes'
+import { CancellationPromise, Duration, noop } from '@chassisjs/hermes'
 import { Lsn } from '../../common/lsn.js'
 import { MessageToPublish, PublishingQueue, PublishingQueueOptions } from '../publishingQueue.js'
 import { createIntervalResendingStrategy } from './intervalResendingStrategy.js'
@@ -9,6 +9,7 @@ const createNonBlockingPublishingQueue = <InsertResult>(
   options?: PublishingQueueOptions<InsertResult>,
 ): PublishingQueue<'NonBlockingPublishingQueue', InsertResult> => {
   const onFailedPublish = options?.onFailedPublish || (() => Promise.resolve())
+  const onDequeued = options?.onDequeued || noop
   const ids = new Set<Lsn>()
   // FIFO
   const messages = new Array<StateMessage<InsertResult>>()
@@ -65,6 +66,7 @@ const createNonBlockingPublishingQueue = <InsertResult>(
     if (index !== -1) {
       messages.splice(index, 1)
       ids.delete(message.transaction.lsn)
+      onDequeued()
     }
   }
 

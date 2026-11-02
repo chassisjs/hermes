@@ -12,6 +12,7 @@ type MessageToPublish<InsertResult> = {
 type PublishingQueueOptions<InsertResult> = {
   waitAfterFailedPublish?: Duration
   onFailedPublish?: (tx: Transaction<InsertResult>) => Promise<void>
+  onDequeued?: () => void
 }
 
 type PublishingQueue<Name extends PublishingQueueType = PublishingQueueType, InsertResult = unknown> = DeepReadonly<{

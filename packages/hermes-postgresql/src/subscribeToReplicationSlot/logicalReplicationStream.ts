@@ -2,6 +2,7 @@
 
 import { Duration, noop, swallow } from '@chassisjs/hermes'
 import { pipe } from 'fp-ts/function'
+import { Duplex } from 'node:stream'
 import { setTimeout } from 'node:timers/promises'
 import postgres from 'postgres'
 import { convertBigIntToLsn, incrementWAL } from '../common/lsn.js'
@@ -23,20 +24,30 @@ export type LogicalReplicationParams<InsertResult> = {
   sql: HermesSql
   columnConfig: ColumnConfig<keyof InsertResult>
   onInsert: OnInsert<InsertResult>
+  statusUpdateInterval?: Duration
+}
+
+export type ReplicationFlowControl = {
+  pause: () => void
+  resume: () => void
+  isPaused: () => boolean
 }
 
 const PSQL_ADMIN_SHUTDOWN = '57P01'
 
-const startLogicalReplication = async <InsertResult>(params: LogicalReplicationParams<InsertResult>) => {
+const startLogicalReplication = async <InsertResult>(
+  params: LogicalReplicationParams<InsertResult>,
+): Promise<ReplicationFlowControl> => {
   const { state, sql } = params
   const onInsert = params.onInsert || noop
   const location = typeof state.lastProcessedLsn === 'undefined' ? '0/00000000' : state.lastProcessedLsn
   let currentTransaction = emptyTransaction<InsertResult>(location)
-  const stream = await sql
+  // postgres.js types it as `Writable`, but a COPY BOTH (replication) query returns a `Duplex`.
+  const stream = (await sql
     .unsafe(
       `START_REPLICATION SLOT ${state.slotName} LOGICAL ${convertBigIntToLsn(incrementWAL(location))} (proto_version '1', publication_names '${params.state.publication}')`,
     )
-    .writable()
+    .writable()) as unknown as Duplex
   const curriedOnData = _onData(params.columnConfig)
   const onData = (message: Buffer) => curriedOnData(message)
   const acknowledgeLastLsn = sendStandbyStatusUpdate(stream, () => state.lastProcessedLsn)
@@ -91,9 +102,20 @@ const startLogicalReplication = async <InsertResult>(params: LogicalReplicationP
     }
   })
 
+  // a paused stream does not read the keepalive messages, so the status is sent periodically to not hit `wal_sender_timeout`.
+  const statusUpdateTimer = setInterval(acknowledgeLastLsn, (params.statusUpdateInterval || Duration.ofSeconds(10)).ms)
+  statusUpdateTimer.unref()
+
   stream.on('close', () => {
+    clearInterval(statusUpdateTimer)
     close().catch(noop)
   })
+
+  return {
+    pause: () => stream.pause(),
+    resume: () => stream.resume(),
+    isPaused: () => stream.isPaused(),
+  }
 }
 
 export { LogicalReplicationState, startLogicalReplication }

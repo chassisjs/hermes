@@ -18,7 +18,10 @@ import {
   MessageToPublish,
 } from '../publishingQueue/createSerializedPublishingQueue.js'
 import { createNonBlockingPublishingQueue } from '../publishingQueue/nonBlockingQueue/createNonBlockingPublishingQueue.js'
-import { startLogicalReplication } from '../subscribeToReplicationSlot/logicalReplicationStream.js'
+import {
+  type ReplicationFlowControl,
+  startLogicalReplication,
+} from '../subscribeToReplicationSlot/logicalReplicationStream.js'
 import { LogicalReplicationState, Transaction } from '../subscribeToReplicationSlot/types.js'
 import { killReplicationProcesses } from './killBackendReplicationProcesses.js'
 import { migrate } from './migrate.js'
@@ -328,8 +331,18 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
     const createPublishingQueue = this._params.serialization
       ? createSerializedPublishingQueue
       : createNonBlockingPublishingQueue
+    const maxQueueSize = this._params.maxQueueSize ?? 1000
+    let replication: ReplicationFlowControl | undefined
+
+    assert(Number.isInteger(maxQueueSize) && maxQueueSize >= 1, '`maxQueueSize` has to be a positive integer.')
+
     const publishingQueue = createPublishingQueue<InsertResult>(onPublish, {
       onFailedPublish,
+      onDequeued: () => {
+        if (replication?.isPaused() && publishingQueue.size() <= Math.floor(maxQueueSize / 2)) {
+          replication.resume()
+        }
+      },
       waitAfterFailedPublish: this._params.waitAfterFailedPublish || Duration.ofSeconds(30),
     })
     const sql = (this._sql = this._createClient({
@@ -374,7 +387,7 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
     }
 
     try {
-      await startLogicalReplication<InsertResult>({
+      replication = await startLogicalReplication<InsertResult>({
         state: replicationState,
         sql: subscribeSql,
         columnConfig: {
@@ -394,6 +407,11 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
             },
           }
           publishingQueue.queue(message)
+
+          if (publishingQueue.size() >= maxQueueSize) {
+            replication?.pause()
+          }
+
           await publishingQueue.run(message)
           // await sql.begin(async (sql) => {
           //   await publishingQueue.run(message)

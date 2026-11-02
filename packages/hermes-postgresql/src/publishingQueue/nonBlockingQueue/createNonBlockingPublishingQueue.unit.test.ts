@@ -401,4 +401,29 @@ describe(`createNonBlockingPublishingQueue`, () => {
     expect(calls).toBeGreaterThan(1)
     expect(mockPublish).toHaveBeenCalledTimes(calls)
   })
+
+  test(`'onDequeued' is called once for every published and acknowledged message`, async () => {
+    const mockPublish = jest
+      .fn<(messageToPublish: MessageToPublish<InsertResult>) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('Publish failed'))
+      .mockResolvedValue()
+    const sizes: number[] = []
+    const queueRef: { size?: () => number } = {}
+    const onDequeued = jest.fn(() => {
+      sizes.push(queueRef.size!())
+    })
+    const { queue, run, size, waitUntilIsEmpty, dispose } = createNonBlockingPublishingQueue(mockPublish, {
+      waitAfterFailedPublish: Duration.ofMiliseconds(10),
+      onDequeued,
+    })
+
+    queueRef.size = size
+    await Promise.all([run(queue(createMockMessage('0/1'))), run(queue(createMockMessage('0/2')))])
+    await waitUntilIsEmpty()
+
+    expect(onDequeued).toHaveBeenCalledTimes(2)
+    expect(sizes).toEqual([1, 0])
+
+    await dispose()
+  })
 })

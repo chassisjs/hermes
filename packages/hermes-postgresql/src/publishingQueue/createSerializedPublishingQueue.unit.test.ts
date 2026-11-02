@@ -391,4 +391,25 @@ describe('publishingQueue', () => {
     expect(size()).toBe(0)
     expect(mockPublish).toHaveBeenCalledTimes(2)
   })
+
+  it('should call `onDequeued` once for every published and acknowledged message', async () => {
+    const onDequeued = jest.fn()
+    const mockPublish = jest
+      .fn<(messageToPublish: MessageToPublish<InsertResult>) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('Publish failed'))
+      .mockResolvedValue()
+    const { queue, run, size } = createSerializedPublishingQueue(mockPublish, {
+      waitAfterFailedPublish: Duration.ofMiliseconds(1),
+      onDequeued,
+    })
+    const sizes: number[] = []
+
+    onDequeued.mockImplementation(() => sizes.push(size()))
+    queue(createMockMessage('0/1'))
+    queue(createMockMessage('0/2'))
+    await run()
+
+    expect(onDequeued).toHaveBeenCalledTimes(2)
+    expect(sizes).toEqual([1, 0])
+  })
 })

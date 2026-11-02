@@ -69,6 +69,17 @@ type ConsumerCreationParams<Message extends JSONValue> = {
   waitAfterFailedPublish?: Duration
 
   /**
+   * Maximum number of transactions waiting to be published or acknowledged.
+   *
+   * When the limit is reached, Hermes stops reading the replication stream, so PostgreSQL holds the changes
+   * in the WAL instead of the consumer holding them in memory. Reading resumes once the queue drops to half the limit.
+   * With `serialization: false`, it also caps the number of concurrent `publish` calls.
+   *
+   * @defaultValue `1000`
+   */
+  maxQueueSize?: number
+
+  /**
    * Whether to automatically stop the consumer on SIGTERM/SIGINT signals.
    *
    * @defaultValue `true`

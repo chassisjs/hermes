@@ -1,13 +1,7 @@
 import { assertNever, CancellationPromise, Duration, noop } from '@chassisjs/hermes'
 import { setTimeout } from 'node:timers/promises'
 import { Lsn } from '../common/lsn.js'
-import { Transaction } from '../subscribeToReplicationSlot/types.js'
-import { MessageToPublish, PublishingQueue } from './publishingQueue.js'
-
-type PublishingQueueOptions<InsertResult> = {
-  waitAfterFailedPublish?: Duration
-  onFailedPublish?: (tx: Transaction<InsertResult>) => Promise<void>
-}
+import { MessageToPublish, PublishingQueue, PublishingQueueOptions } from './publishingQueue.js'
 
 type PublishResult = 'published' | 'failed' | 'unacknowledged' | 'exhausted'
 
@@ -17,6 +11,7 @@ const createSerializedPublishingQueue = <InsertResult>(
 ): PublishingQueue<'SerializedPublishingQueue', InsertResult> => {
   const waitAfterFailedPublish = options?.waitAfterFailedPublish || Duration.ofSeconds(1)
   const onFailedPublish = options?.onFailedPublish || (() => Promise.resolve())
+  const onDequeued = options?.onDequeued || noop
   const ids = new Set<Lsn>()
   // FIFO
   const messages = new Array<MessageToPublish<InsertResult>>()
@@ -44,6 +39,7 @@ const createSerializedPublishingQueue = <InsertResult>(
 
     const oldest = messages.shift()!
     ids.delete(oldest.transaction.lsn)
+    onDequeued()
   }
 
   const _waitAfterFailure = async () => {

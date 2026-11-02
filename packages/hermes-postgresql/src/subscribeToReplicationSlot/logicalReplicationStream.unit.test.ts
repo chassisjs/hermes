@@ -1,6 +1,7 @@
 import { describe, expect, jest, test } from '@jest/globals'
 import { Duplex } from 'node:stream'
-import { setImmediate } from 'node:timers/promises'
+import { setImmediate, setTimeout } from 'node:timers/promises'
+import { Duration } from '@chassisjs/hermes'
 import { convertBigIntToLsn, convertLsnToBigInt, Lsn } from '../common/lsn.js'
 import { HermesSql } from '../common/types.js'
 import { startLogicalReplication } from './logicalReplicationStream.js'
@@ -140,5 +141,73 @@ describe('startLogicalReplication', () => {
     expect(acknowledgedLsns()).toEqual([])
     expect(errors).toHaveLength(1)
     expect(unhandledRejections).toEqual([])
+  })
+
+  test(`a paused stream does not deliver transactions until it is resumed`, async () => {
+    const { sql, receive, destroy } = createReplicationStream()
+    const state: LogicalReplicationState = {
+      lastProcessedLsn: '0/10',
+      timestamp: new Date(),
+      publication: 'hermes_pub',
+      slotName: 'hermes_slot_app_default',
+    }
+    const lsns: Lsn[] = []
+
+    const replication = await startLogicalReplication<Row>({
+      state,
+      sql,
+      columnConfig: { messageId: 'text' },
+      onInsert: async (transaction) => {
+        lsns.push(transaction.lsn)
+      },
+    })
+
+    await receive(begin('0/20', 1), insert('a1'), commit('0/20'))
+    replication.pause()
+    await receive(begin('0/30', 2), insert('b1'), commit('0/30'))
+
+    expect(replication.isPaused()).toBe(true)
+    expect(lsns).toEqual(['0/20'])
+
+    replication.resume()
+    await setImmediate()
+
+    expect(replication.isPaused()).toBe(false)
+    expect(lsns).toEqual(['0/20', '0/30'])
+
+    destroy()
+  })
+
+  test(`the status is sent periodically, also when the stream is paused`, async () => {
+    const { sql, acknowledgedLsns, destroy } = createReplicationStream()
+    const state: LogicalReplicationState = {
+      lastProcessedLsn: '0/10',
+      timestamp: new Date(),
+      publication: 'hermes_pub',
+      slotName: 'hermes_slot_app_default',
+    }
+
+    const replication = await startLogicalReplication<Row>({
+      state,
+      sql,
+      columnConfig: { messageId: 'text' },
+      onInsert: async () => {},
+      statusUpdateInterval: Duration.ofMiliseconds(20),
+    })
+
+    replication.pause()
+    await setTimeout(70)
+
+    expect(acknowledgedLsns().length).toBeGreaterThanOrEqual(2)
+    expect(new Set(acknowledgedLsns())).toEqual(new Set(['0/10']))
+
+    destroy()
+    await setImmediate()
+
+    const sent = acknowledgedLsns().length
+
+    await setTimeout(50)
+
+    expect(acknowledgedLsns()).toHaveLength(sent)
   })
 })
