@@ -68,6 +68,6 @@
     "ts-essentials": "~10.2.1"
   },
   "dependencies": {
-    "uuid": "~14.0.2"
+    "uuid": "~14.0.3"
   }
 }

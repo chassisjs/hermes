@@ -2,7 +2,6 @@
   "extends": "../../tsconfig.eslint.json",
   "include": ["./src/**/*", "test/**/*"],
   "compilerOptions": {
-    "baseUrl": ".",
     "noEmit": false,
     "composite": true,
     "declaration": true,

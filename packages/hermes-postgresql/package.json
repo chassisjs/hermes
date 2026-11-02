@@ -65,12 +65,12 @@
   },
   "devDependencies": {
     "@jest/globals": "~30.5.2",
-    "@testcontainers/postgresql": "~11.13.0",
+    "@testcontainers/postgresql": "~12.2.1",
     "@types/pg": "^8.23.1",
     "drizzle-orm": "^0.45.4",
     "kysely": "^0.29.8",
     "pg": "^8.23.1",
-    "testcontainers": "~11.13.0",
+    "testcontainers": "~12.2.1",
     "ts-essentials": "~10.2.1"
   },
   "dependencies": {

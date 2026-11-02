@@ -4,7 +4,6 @@
   "compilerOptions": {
     "composite": true,
     "noEmit": true,
-    "baseUrl": ".",
     "outDir": "./dist",
     "module": "NodeNext",
     "target": "ESNext",

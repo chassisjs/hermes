@@ -4,8 +4,8 @@
   "compilerOptions": {
     "composite": true,
     "noEmit": true,
-    "baseUrl": ".",
     "outDir": "./dist",
+    "rootDir": ".",
     "module": "NodeNext",
     "target": "ESNext",
     "moduleResolution": "NodeNext",
