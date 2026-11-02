@@ -1,5 +1,6 @@
-import postgres, { JSONValue, Options, PostgresType } from 'postgres'
+import postgres, { Options, PostgresType } from 'postgres'
 import { ConsumerCreationParams } from '../common/ConsumerCreationParams.js'
+import { JSONValue } from '../common/types.js'
 import { OutboxConsumer } from './OutboxConsumer.js'
 
 /**

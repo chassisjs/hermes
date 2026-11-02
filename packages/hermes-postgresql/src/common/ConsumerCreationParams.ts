@@ -1,9 +1,9 @@
 import { Duration } from '@chassisjs/hermes'
-import { JSONValue, Options, PostgresType } from 'postgres'
+import { Options, PostgresType } from 'postgres'
 import { AsyncOrSync } from 'ts-essentials'
 import { UseAsyncOutboxPolicy } from '../policies/useBasicAsyncStoragePolicy.js'
 import { PublishingQueue } from '../publishingQueue/publishingQueue.js'
-import { HermesMessageEnvelope, NowFunction } from './types.js'
+import { HermesMessageEnvelope, JSONValue, NowFunction } from './types.js'
 
 /**
  * Configuration parameters for creating an outbox consumer.

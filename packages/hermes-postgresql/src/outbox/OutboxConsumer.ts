@@ -1,6 +1,6 @@
 import { assert, Duration, swallow } from '@chassisjs/hermes'
 import { setTimeout } from 'node:timers/promises'
-import postgres, { JSONValue, Options, PostgresType } from 'postgres'
+import postgres, { Options, PostgresType } from 'postgres'
 import { getSlotName, PublicationName } from '../common/consts.js'
 import { ConsumerCreationParams } from '../common/ConsumerCreationParams.js'
 import { HermesConsumerAlreadyTakenError } from '../common/errors.js'
@@ -9,6 +9,7 @@ import {
   HermesSql,
   InsertResult,
   IOutboxConsumer,
+  JSONValue,
   MessageEnvelope,
   OutboxTransaction,
   PublishOptions,

@@ -1,11 +1,10 @@
 import { Duration, literalObject } from '@chassisjs/hermes'
-import { JSONValue } from 'postgres'
 import {
   createAsyncOutboxConsumer,
   HermesAsyncMessageEnvelope,
   IAsyncOutboxConsumer,
 } from '../asyncOutbox/AsyncOutboxConsumer.js'
-import { HermesMessageEnvelope } from '../common/types.js'
+import { HermesMessageEnvelope, JSONValue } from '../common/types.js'
 import { OutboxConsumer } from '../outbox/OutboxConsumer.js'
 
 /**

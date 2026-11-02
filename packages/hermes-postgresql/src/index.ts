@@ -209,6 +209,7 @@ export {
   type HermesMessageEnvelope,
   type HermesSql,
   type IOutboxConsumer,
+  type JSONValue,
   type MessageEnvelope,
   type NowFunction,
   type Publish,

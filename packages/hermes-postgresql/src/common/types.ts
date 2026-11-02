@@ -1,6 +1,21 @@
-import { JSONValue, Sql, TransactionSql } from 'postgres'
+import { Sql, TransactionSql } from 'postgres'
 import { DeepReadonly } from 'ts-essentials'
 import { ConsumerCreationParams } from './ConsumerCreationParams.js'
+
+/**
+ * A value that can be stored as a message (serialized with `JSON.stringify`).
+ */
+type JSONValue =
+  | null
+  | string
+  | number
+  | boolean
+  | Date // serialized as `string`
+  | readonly JSONValue[]
+  | { toJSON(): any }
+  | {
+      readonly [prop: string | number]: undefined | JSONValue | ((...args: any) => any)
+    }
 
 /**
  * Envelope containing a message along with Hermes-specific metadata.
@@ -327,6 +342,7 @@ type HermesSql = Sql<{
 
 export type {
   ErrorCallback,
+  JSONValue,
   HermesMessageEnvelope,
   HermesSql,
   InsertResult,

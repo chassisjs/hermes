@@ -1,7 +1,8 @@
 import { Duration } from '@chassisjs/hermes'
 import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals'
 import { setTimeout } from 'node:timers/promises'
-import postgres, { JSONValue } from 'postgres'
+import postgres from 'postgres'
+import { JSONValue } from '../common/types.js'
 import { AsyncOutboxConsumer, HermesAsyncMessageEnvelope } from './AsyncOutboxConsumer.js'
 
 type Patamter = {

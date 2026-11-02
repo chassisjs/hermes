@@ -1,8 +1,7 @@
 import { Duration } from '@chassisjs/hermes'
-import { JSONValue } from 'postgres'
 import { AsyncOrSync } from 'ts-essentials'
 import { insertRowsAtomically } from '../common/queryExecutor.js'
-import { HermesSql, MessageEnvelope, OutboxTransaction, Stop } from '../common/types.js'
+import { HermesSql, JSONValue, MessageEnvelope, OutboxTransaction, Stop } from '../common/types.js'
 
 /**
  * Envelope for messages in the async outbox with processing metadata.

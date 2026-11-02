@@ -30,7 +30,7 @@
     "email": "contact@arturwojnar.dev"
   },
   "engines": {
-    "node": ">=18.20.3"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "homepage": "https://docs.hermesjs.tech",
   "license": "ISC",
@@ -76,7 +76,7 @@
   "dependencies": {
     "fp-ts": "~2.16.11",
     "nodemon": "~3.1.14",
-    "postgres": "~3.4.9"
+    "postgres": "~4.0.0"
   },
   "peerDependencies": {
     "@chassisjs/hermes": "~1.0.0-alpha.15"
