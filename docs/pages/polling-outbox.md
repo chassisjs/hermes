@@ -5,7 +5,7 @@
 
 Hermes PostgreSQL and Hermes MongoDB read the outbox from the log of the database (Logical Replication, Change Streams). A **polling outbox** asks the database for undelivered messages every few seconds instead. It works with any database that can lock rows, and it is what the async outbox of Hermes PostgreSQL (`outbox.send()`) is built on.
 
-The engine is in `@chassisjs/hermes` and does not depend on any database. A database gives it a **store**: a few queries that claim, read and mark messages. `@chassisjs/hermes-postgresql` has the store of its `asyncOutbox` table (`createPollingStore`).
+The engine is in `@chassisjs/hermes` and does not depend on any database. A database gives it a **store**: a few queries that claim, read and mark messages. `@chassisjs/hermes-postgresql` has the store of its `asyncOutbox` table, and [`@chassisjs/hermes-mysql`](./mysql/basic-usage.md) is a whole outbox for MySQL built on it. Both export their store as `createPollingStore`.
 
 ## Why not "give me the messages after the last id"?
 

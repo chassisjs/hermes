@@ -51,6 +51,13 @@ export default defineConfig({
         ],
       },
       {
+        text: 'MySQL',
+        items: [
+          { text: 'Basic usage', link: '/pages/mysql/basic-usage.md' },
+          { text: 'API docs', link: 'https://docs.hermesjs.tech/hermes-mysql/index.html' },
+        ],
+      },
+      {
         text: 'Others',
         items: [{ text: 'Useful links', link: '/pages/links.md' }],
       },

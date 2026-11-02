@@ -27,9 +27,10 @@
     "build": "npm run build:ts && npm run build --ws",
     "build:core": "npm run build -w packages/hermes",
     "build:mongodb": "npm run build -w packages/hermes-mongodb",
+    "build:mysql": "npm run build -w packages/hermes-mysql",
     "build:postgres": "npm run build -w packages/hermes-postgresql",
     "build:ts": "npm run build:ts --ws",
-    "docs:clear": "rm -rf docs/public/hermes-postgresql docs/public/hermes-mongodb .vitepress/cache packages/hermes/docs",
+    "docs:clear": "rm -rf docs/public/hermes-postgresql docs/public/hermes-mongodb docs/public/hermes-mysql .vitepress/cache packages/hermes/docs",
     "build:clear": "rm -rf node_modules/ packages/*/node_modules packages/*/lib packages/*/tsconfig.build.tsbuildinfo packages/*/.rollup.cache packages/*/coverage",
     "test": "npm run test --ws",
     "lint": "npm run lint:eslint --ws && npm run lint:prettier",
@@ -109,6 +110,7 @@
   "workspaces": [
     "packages/hermes",
     "packages/hermes-mongodb",
+    "packages/hermes-mysql",
     "packages/hermes-postgresql"
   ],
   "dependencies": {

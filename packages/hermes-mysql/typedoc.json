@@ -1,0 +1,20 @@
+{
+  // Comments are supported, like tsconfig.json
+  "name": "Hermes MySQL",
+  "readme": "README.md",
+  "entryPoints": ["src/index.ts"],
+  "customCss": "typedoc.css",
+  "favicon": "public/favicon.ico",
+  "navigationLinks": {
+    "Hermes": "/"
+  },
+  "titleLink": "/hermes-mysql/index.html",
+  // "plugin": ["typedoc-plugin-markdown"],
+  "plugin": ["typedoc-material-theme"],
+  "themeColor": "#FA8F05",
+  "out": "../../docs/public/hermes-mysql",
+  "highlightLanguages": ["typescript", "javascript", "bash", "sql", "ini", "json"],
+  "excludeInternal": true,
+  "excludePrivate": true,
+  "excludeProtected": true
+}

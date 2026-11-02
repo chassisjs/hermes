@@ -1,0 +1,27 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["./src/**/*", "./test/**/*"],
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": true,
+    "outDir": "./dist",
+    "rootDir": ".",
+    "module": "NodeNext",
+    "target": "ESNext",
+    "moduleResolution": "NodeNext",
+    "esModuleInterop": true,
+    "noImplicitAny": true,
+    "removeComments": true,
+    "preserveConstEnums": true,
+    "sourceMap": true,
+    "paths": {
+      "@chassisjs/hermes": ["../hermes"],
+      "@chassisjs/hermes-mysql": ["./"]
+    }
+  },
+  "references": [
+    {
+      "path": "../hermes/"
+    }
+  ]
+}

@@ -3,5 +3,5 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "include": ["packages/hermes", "packages/hermes-mongodb", "packages/hermes-postgresql"]
+  "include": ["packages/hermes", "packages/hermes-mongodb", "packages/hermes-mysql", "packages/hermes-postgresql"]
 }

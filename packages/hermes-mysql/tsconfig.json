@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.eslint.json",
+  "include": ["./src/**/*", "test/**/*"],
+  "compilerOptions": {
+    "noEmit": false,
+    "composite": true,
+    "declaration": true,
+    "outDir": "./lib",
+    "rootDirs": ["./src", "./test"],
+    "paths": {
+      "@chassisjs/hermes": ["../hermes"],
+      "@chassisjs/hermes-mysql": ["./"]
+    }
+  },
+  "references": [
+    {
+      "path": "../hermes/"
+    }
+  ]
+}

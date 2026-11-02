@@ -12,13 +12,14 @@ Hermes is a Production-Ready TypeScript Outbox Pattern implementation distribute
 
 ## Monorepo Structure
 
-This is a Lerna-managed monorepo with npm workspaces containing three main packages:
+This is a Lerna-managed monorepo with npm workspaces containing four main packages:
 
 ```
 hermes/
 ├── packages/
 │   ├── hermes/                    # Core package with base utilities
 │   ├── hermes-mongodb/            # MongoDB implementation
+│   ├── hermes-mysql/              # MySQL implementation (polling)
 │   └── hermes-postgresql/         # PostgreSQL implementation
 ├── examples/                      # Example implementations
 ├── docs/                         # VitePress documentation
@@ -45,6 +46,17 @@ hermes/
 - **Dependencies:** `whatwg-url@^16.0.1`
 - **Peer Dependencies:** `@chassisjs/hermes@~1.0.0-alpha.15`, `mongodb@>= 6.8.0 || < 7.0.0`
 - **Node:** `>=18.20.3` (`engines`)
+
+#### @chassisjs/hermes-mysql
+
+- **Location:** `packages/hermes-mysql`
+- **Description:** MySQL 8.0+ / Aurora MySQL 3 Outbox Pattern implementation on the polling outbox of the core package (`createPollingStore` + `usePartitionOrderingPolicy`/`useNoOrderingPolicy`)
+- **Dependencies:** `mysql2@~3.24.6`
+- **Peer Dependencies:** `@chassisjs/hermes` (needs the polling outbox; raise the range in the release like for hermes-postgresql)
+- **Node:** `>=18.20.3` (`engines`)
+- **Tables:** `hermes_outbox`, `hermes_outbox_partition`, `hermes_migrations`. Migrations are versioned in `src/migrate.ts` and run under `GET_LOCK`. MySQL commits DDL at once, so every migration has to be safe to run again (`CREATE TABLE IF NOT EXISTS`, indexes inside `CREATE TABLE`)
+- **Claims:** `SELECT ... FOR UPDATE SKIP LOCKED` in `READ COMMITTED` transactions, so that they do not lock gaps and block the inserts of the application
+- **Tests:** Testcontainers with `mysql:8.0` (Aurora MySQL 3 is 8.0 compatible); `MYSQL_VERSION=8.4 npm test -w packages/hermes-mysql` runs them on another version
 
 #### @chassisjs/hermes-postgresql
 
@@ -126,6 +138,7 @@ npm run build
 # Build specific package
 npm run build:core        # packages/hermes
 npm run build:mongodb     # packages/hermes-mongodb
+npm run build:mysql       # packages/hermes-mysql
 npm run build:postgres    # packages/hermes-postgresql
 
 # Clean build artifacts
@@ -402,6 +415,9 @@ The project uses:
 ```
 @chassisjs/hermes (core)
     ├── uuid@~14.0.3
+    │
+    ├── @chassisjs/hermes-mysql (depends on core)
+    │   └── mysql2@~3.24.6
     │
     ├── @chassisjs/hermes-mongodb (depends on core)
     │   ├── whatwg-url@^16.0.1

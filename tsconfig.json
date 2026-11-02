@@ -7,6 +7,7 @@
     "./packages/*/tsconfig.json",
     "packages/hermes/rollup.config.js",
     "packages/hermes-mongodb/rollup.config.js",
+    "packages/hermes-mysql/rollup.config.js",
     "packages/hermes-postgresql/rollup.config.js"
   ],
   "exclude": ["node_modules", "tmp"],
@@ -17,12 +18,14 @@
     "paths": {
       "@chassisjs/hermes": ["./packages/hermes/src"],
       "@chassisjs/hermes-mongodb": ["./packages/hermes-mongodb/src"],
+      "@chassisjs/hermes-mysql": ["./packages/hermes-mysql/src"],
       "@chassisjs/hermes-postgresql": ["./packages/hermes-postgresql/src"]
     }
   },
   "references": [
     { "path": "./packages/hermes" },
     { "path": "./packages/hermes-mongodb" },
+    { "path": "./packages/hermes-mysql" },
     { "path": "./packages/hermes-postgresql" }
   ]
 }

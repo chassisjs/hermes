@@ -1,0 +1,393 @@
+import { Duration } from '@chassisjs/hermes'
+import { afterAll, beforeAll, describe, expect, jest, test } from '@jest/globals'
+import { CompiledQuery, Kysely, MysqlDialect } from 'kysely'
+import { createPool as createCallbackPool } from 'mysql2'
+import { type Pool, type PoolOptions, type RowDataPacket } from 'mysql2/promise'
+import { setTimeout } from 'node:timers/promises'
+import { createOutboxConsumer, type ConsumerCreationParams, type HermesMessageEnvelope, migrate } from '../src/index.js'
+import { createMySql } from './mysql.js'
+
+jest.setTimeout(Duration.ofMinutes(5).ms)
+
+type Event = { name: string; value: number }
+
+const mysql = createMySql(process.env.MYSQL_VERSION)
+
+beforeAll(() => mysql.start(), Duration.ofMinutes(3).ms)
+afterAll(() => mysql.stop())
+
+const waitUntil = async (condition: () => boolean, timeout = Duration.ofSeconds(20)) => {
+  const deadline = Date.now() + timeout.ms
+
+  while (!condition()) {
+    if (Date.now() > deadline) {
+      throw new Error('Timed out.')
+    }
+
+    await setTimeout(20)
+  }
+}
+
+const envelope = (messageId: string, value = 1) => ({
+  messageId,
+  messageType: 'Test',
+  message: { name: 'Test', value },
+})
+
+const createConsumer = (
+  options: PoolOptions,
+  publish: ConsumerCreationParams<Event>['publish'],
+  params?: Partial<ConsumerCreationParams<Event>>,
+) =>
+  createOutboxConsumer<Event>({
+    getOptions: () => options,
+    publish,
+    consumerName: 'app',
+    pollInterval: Duration.ofMiliseconds(50),
+    ...params,
+  })
+
+const select = async <T>(pool: Pool, sql: string) => {
+  const [rows] = await pool.query<RowDataPacket[]>(sql)
+
+  return rows as T[]
+}
+
+describe('Migrations', () => {
+  test('instances that start at the same time apply every migration once', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      const results = await Promise.all([migrate(pool), migrate(pool), migrate(pool)])
+
+      expect(results.flat()).toEqual([1])
+      expect(await migrate(pool)).toEqual([])
+      expect(await select(pool, 'SELECT `version`, `name` FROM `hermes_migrations`')).toEqual([
+        { version: 1, name: 'create the outbox' },
+      ])
+      expect((await select<{ name: string }>(pool, 'SHOW TABLES')).map((row) => Object.values(row)[0]).sort()).toEqual([
+        'hermes_migrations',
+        'hermes_outbox',
+        'hermes_outbox_partition',
+      ])
+    })
+  })
+
+  test('start() does not migrate when `migrate` is false', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const stop = await createConsumer(options, () => {}, { migrate: false }).start()
+
+      await stop()
+
+      expect(await select(pool, 'SHOW TABLES')).toEqual([])
+    })
+  })
+})
+
+describe('Outbox', () => {
+  test('stores the messages in the transaction of the application and publishes the committed ones', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const published: HermesMessageEnvelope<Event>[] = []
+      const outbox = createConsumer(options, (message) => {
+        published.push(message)
+      })
+      const stop = await outbox.start()
+      const connection = await pool.getConnection()
+
+      try {
+        await connection.beginTransaction()
+        await outbox.queue(envelope('rolled-back'), { tx: connection })
+        await connection.rollback()
+
+        await connection.beginTransaction()
+        await outbox.queue([envelope('committed-1', 1), envelope('committed-2', 2)], { tx: connection })
+        await connection.commit()
+      } finally {
+        connection.release()
+      }
+
+      await waitUntil(() => published.length === 2)
+      await setTimeout(200)
+      await stop()
+
+      expect(published).toEqual([
+        {
+          position: expect.any(String),
+          partitionKey: 'default',
+          messageId: 'committed-1',
+          messageType: 'Test',
+          redeliveryCount: 0,
+          message: { name: 'Test', value: 1 },
+        },
+        expect.objectContaining({ messageId: 'committed-2', message: { name: 'Test', value: 2 } }),
+      ])
+      expect(
+        await select(pool, 'SELECT `message_id`, `delivered_at` IS NOT NULL AS delivered FROM `hermes_outbox`'),
+      ).toEqual([
+        { message_id: 'committed-1', delivered: '1' },
+        { message_id: 'committed-2', delivered: '1' },
+      ])
+    })
+  })
+
+  test('works with the transactions of Kysely', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const published: string[] = []
+      const outbox = createConsumer(options, ({ messageId }) => {
+        published.push(messageId)
+      })
+      const db = new Kysely<unknown>({ dialect: new MysqlDialect({ pool: createCallbackPool(options) }) })
+      const stop = await outbox.start()
+
+      await db.transaction().execute(async (trx) => {
+        await outbox.queue(envelope('kysely'), {
+          tx: { query: (text, params) => trx.executeQuery(CompiledQuery.raw(text, params)) },
+        })
+      })
+
+      await waitUntil(() => published.length === 1)
+      await stop()
+      await db.destroy()
+
+      expect(published).toEqual(['kysely'])
+      expect(await select(pool, 'SELECT `data` FROM `hermes_outbox`')).toEqual([{ data: { name: 'Test', value: 1 } }])
+    })
+  })
+
+  test('publishes a message whose transaction commits after a transaction with a greater position', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const published: string[] = []
+      const outbox = createConsumer(options, ({ messageId }) => {
+        published.push(messageId)
+      })
+      const stop = await outbox.start()
+      const connection = await pool.getConnection()
+
+      try {
+        await connection.beginTransaction()
+        await outbox.queue(envelope('late'), { tx: connection })
+        await outbox.queue(envelope('early'))
+
+        await waitUntil(() => published.length === 1)
+        await setTimeout(200)
+
+        expect(published).toEqual(['early'])
+
+        await connection.commit()
+      } finally {
+        connection.release()
+      }
+
+      await waitUntil(() => published.length === 2)
+      await stop()
+
+      expect(published).toEqual(['early', 'late'])
+      expect(await select(pool, 'SELECT `message_id` FROM `hermes_outbox` ORDER BY `position`')).toEqual([
+        { message_id: 'late' },
+        { message_id: 'early' },
+      ])
+    })
+  })
+
+  test('stores many messages at once, all or none', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const outbox = createConsumer(options, () => {}, { pollInterval: Duration.ofMinutes(1) })
+      const batch = Array.from({ length: 2500 }, (_, i) => envelope(`m${i}`))
+      const stop = await outbox.start()
+      const count = async () =>
+        Number((await select<{ count: string }>(pool, 'SELECT COUNT(*) AS count FROM `hermes_outbox`'))[0].count)
+      const connection = await pool.getConnection()
+
+      await outbox.queue(batch)
+      await connection.beginTransaction()
+      await outbox.queue(batch, { tx: connection })
+      await connection.commit()
+      connection.release()
+
+      expect(await count()).toBe(5000)
+
+      // the invalid message is in the last statement, so the statements before it have to be rolled back
+      await expect(outbox.queue([...batch, envelope('x'.repeat(300))])).rejects.toThrow(/too long/)
+
+      expect(await count()).toBe(5000)
+
+      await stop()
+    })
+  })
+})
+
+describe('Ordering', () => {
+  test('a failed message stops its partition until it is published, other partitions go on', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const published: string[] = []
+      let failures = 2
+      const outbox = createConsumer(
+        options,
+        ({ messageId }) => {
+          if (messageId === 'a1' && failures-- > 0) {
+            throw new Error('broker is down')
+          }
+          published.push(messageId)
+        },
+        { retry: () => Duration.ofMiliseconds(100) },
+      )
+
+      await migrate(outbox.getDbConnection())
+      await outbox.queue([envelope('a1'), envelope('a2')], { partitionKey: 'a' })
+      await outbox.queue(envelope('b1'), { partitionKey: 'b' })
+
+      const stop = await outbox.start()
+
+      await waitUntil(() => published.length === 3)
+      await stop()
+
+      expect(published).toEqual(['b1', 'a1', 'a2'])
+      expect(await select(pool, 'SELECT `message_id`, `attempts` FROM `hermes_outbox` ORDER BY `position`')).toEqual([
+        { message_id: 'a1', attempts: 2 },
+        { message_id: 'a2', attempts: 0 },
+        { message_id: 'b1', attempts: 0 },
+      ])
+    })
+  })
+
+  test('two instances share the partitions, publish one partition at a time, in order, every message once', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const published: string[] = []
+      const inProgress = new Set<string>()
+      let overlaps = 0
+      const publish = async ({ messageId, partitionKey }: HermesMessageEnvelope<Event>) => {
+        if (inProgress.has(partitionKey)) {
+          overlaps++
+        }
+        inProgress.add(partitionKey)
+        await setTimeout(2)
+        published.push(messageId)
+        inProgress.delete(partitionKey)
+      }
+      const outbox1 = createConsumer(options, publish, { batchSize: 10 })
+      const outbox2 = createConsumer(options, publish, { batchSize: 10 })
+      const stop1 = await outbox1.start()
+
+      for (const partitionKey of ['p0', 'p1', 'p2', 'p3']) {
+        await outbox1.queue(
+          Array.from({ length: 30 }, (_, i) => envelope(`${partitionKey}-${String(i).padStart(2, '0')}`)),
+          { partitionKey },
+        )
+      }
+
+      const stop2 = await outbox2.start()
+
+      await waitUntil(() => published.length === 120)
+      await Promise.all([stop1(), stop2()])
+
+      expect(overlaps).toBe(0)
+      expect(new Set(published).size).toBe(120)
+      for (const partitionKey of ['p0', 'p1', 'p2', 'p3']) {
+        const messages = published.filter((messageId) => messageId.startsWith(partitionKey))
+
+        expect(messages).toEqual([...messages].sort())
+      }
+      expect(
+        await select(pool, 'SELECT `claimed_by` FROM `hermes_outbox_partition` WHERE `claimed_by` IS NOT NULL'),
+      ).toEqual([])
+    })
+  })
+
+  test('another instance takes over the partition of an instance that died after the lease', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const published: string[] = []
+      const outbox = createConsumer(options, ({ messageId }) => {
+        published.push(messageId)
+      })
+
+      await migrate(outbox.getDbConnection())
+      await outbox.queue(envelope('m1'))
+      await pool.query(
+        `INSERT INTO \`hermes_outbox_partition\` (\`consumer_name\`, \`partition_key\`, \`claimed_by\`, \`claimed_until\`)
+         VALUES ('app', 'default', 'dead-instance', DATE_ADD(NOW(6), INTERVAL 1 SECOND))`,
+      )
+
+      const stop = await outbox.start()
+
+      await setTimeout(500)
+      expect(published).toEqual([])
+
+      await waitUntil(() => published.length === 1)
+      await stop()
+
+      expect(published).toEqual(['m1'])
+    })
+  })
+
+  test('with no ordering, two instances share the messages of one partition', async () => {
+    await mysql.withDatabase(async ({ options }) => {
+      const published: string[] = []
+      const createInstance = (name: string) =>
+        createConsumer(
+          options,
+          async ({ messageId }) => {
+            await setTimeout(2)
+            published.push(`${name}:${messageId}`)
+          },
+          { ordering: 'none', batchSize: 5 },
+        )
+      const outbox1 = createInstance('first')
+      const outbox2 = createInstance('second')
+
+      await migrate(outbox1.getDbConnection())
+      await outbox1.queue(Array.from({ length: 60 }, (_, i) => envelope(`m${i}`)))
+
+      const [stop1, stop2] = await Promise.all([outbox1.start(), outbox2.start()])
+
+      await waitUntil(() => published.length === 60)
+      await Promise.all([stop1(), stop2()])
+
+      expect(new Set(published.map((entry) => entry.split(':')[1])).size).toBe(60)
+      expect(new Set(published.map((entry) => entry.split(':')[0]))).toEqual(new Set(['first', 'second']))
+    })
+  })
+})
+
+describe('Consumers and partitions', () => {
+  test('a consumer publishes only its own messages, and only of its partition when it has one', async () => {
+    await mysql.withDatabase(async ({ options }) => {
+      const published: Record<string, string[]> = { tenant: [], all: [], billing: [] }
+      const tenant = createConsumer(
+        options,
+        ({ messageId }) => {
+          published.tenant.push(messageId)
+        },
+        { partitionKey: 'tenant-0b1e8c8e-5f37-4a5e-9b8f-2f0c6a3d9e11' },
+      )
+      const all = createConsumer(
+        options,
+        ({ messageId }) => {
+          published.all.push(messageId)
+        },
+        { consumerName: 'audit' },
+      )
+      const billing = createConsumer(
+        options,
+        ({ messageId }) => {
+          published.billing.push(messageId)
+        },
+        { consumerName: 'billing' },
+      )
+
+      await migrate(tenant.getDbConnection())
+      await tenant.queue(envelope('app-tenant'), { partitionKey: 'tenant-0b1e8c8e-5f37-4a5e-9b8f-2f0c6a3d9e11' })
+      await tenant.queue(envelope('app-default'))
+      await all.queue(envelope('audit-a'), { partitionKey: 'a' })
+      await all.queue(envelope('audit-b'), { partitionKey: 'b' })
+      await billing.queue(envelope('billing'))
+
+      const stops = await Promise.all([tenant.start(), all.start(), billing.start()])
+
+      await waitUntil(() => published.tenant.length + published.all.length + published.billing.length === 4)
+      await setTimeout(300)
+      await Promise.all(stops.map((stop) => stop()))
+
+      expect(published.tenant).toEqual(['app-tenant'])
+      expect([...published.all].sort()).toEqual(['audit-a', 'audit-b'])
+      expect(published.billing).toEqual(['billing'])
+    })
+  })
+})
