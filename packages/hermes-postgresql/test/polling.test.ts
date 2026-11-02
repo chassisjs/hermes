@@ -284,24 +284,46 @@ describe('Async outbox', () => {
 
       await migrate(sql, 'hermes_slot_app_default')
 
-      const stop = createAsyncOutboxConsumer<MedicineEvent>({
-        getSql: () => sql as never,
-        consumerName: 'app',
-        partitionKey: 'tenant-a',
-        checkInterval,
-        publish: async (messages) => {
-          for (const { messageId } of Array.isArray(messages) ? messages : [messages]) {
-            published.push(messageId)
-          }
-        },
-      }).start()
+      const tenantPublished: string[] = []
+      const createConsumer = (partitionKey: string, published: string[]) =>
+        createAsyncOutboxConsumer<MedicineEvent>({
+          getSql: () => sql as never,
+          consumerName: 'app',
+          partitionKey,
+          checkInterval,
+          publish: async (messages) => {
+            for (const { messageId } of Array.isArray(messages) ? messages : [messages]) {
+              published.push(messageId)
+            }
+          },
+        })
+      const stopTenant = createConsumer('tenant-a', tenantPublished).start()
+
+      await setTimeout(300)
+
+      // earlier versions did not store the partition, so a consumer of another partition must not take the message
+      expect(tenantPublished).toEqual([])
+
+      const stopDefault = createConsumer('default', published).start()
 
       await waitUntil(() => published.length === 1)
-      await stop()
 
-      // earlier versions did not store the partition, so the first consumer of the same name takes the message over
-      expect(published).toEqual(['old'])
-      expect(await sql`SELECT "partitionKey" FROM "asyncOutbox"`).toEqual([{ partitionKey: 'tenant-a' }])
+      // an instance of an earlier version stores a message during a rolling deployment
+      await sql`
+        INSERT INTO "asyncOutbox" ("consumerName", "messageId", "messageType", "data")
+        VALUES ('app', 'during-deployment', 'Test', '{}'::jsonb)
+      `
+
+      await waitUntil(() => published.length === 2)
+      await stopDefault()
+      await stopTenant()
+
+      expect(published).toEqual(['old', 'during-deployment'])
+      expect(tenantPublished).toEqual([])
+      expect(await sql`SELECT "partitionKey" FROM "asyncOutbox" ORDER BY "position"`).toEqual([
+        { partitionKey: 'default' },
+        { partitionKey: 'default' },
+      ])
     })
   })
 

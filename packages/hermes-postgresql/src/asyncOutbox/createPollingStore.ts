@@ -33,12 +33,15 @@ type PollingStoreScope = {
  * without undelivered messages are removed from `asyncOutboxPartition`; the next poll adds them again when they get
  * new messages, so a message that commits during the removal is not lost.
  *
- * Earlier versions did not store the partition of a message. The first claim takes over the undelivered messages
- * without a partition of the consumer and puts them in the partition of the store (or `'default'`), so they are
- * published by the first consumer of the same name that starts, as earlier versions did.
+ * Earlier versions did not store the partition of a message, so their messages have no partition (`NULL`). Hermes
+ * cannot know their partition, so only a store of the `'default'` partition (or of all partitions) takes them over, at
+ * every claim: also the messages stored by instances of an earlier version during a rolling deployment. A consumer of
+ * another partition never publishes them, so the messages of one tenant never go to another one. Move them to the
+ * right partition yourself when your consumers have other partitions.
  *
  * `markFailed` changes a message only when `owner` still has the claim of the message, or of its partition when the
- * message itself is not claimed (`usePartitionOrderingPolicy`).
+ * message itself is not claimed (`usePartitionOrderingPolicy`). It locks the partition (`FOR SHARE`), so it waits for
+ * an instance that is claiming it and then sees the new owner.
  *
  * @param getSql - Returns the connection to the database
  * @param scope - The consumer and, optionally, the partition whose messages the store reads
@@ -70,18 +73,15 @@ const createPollingStore = <Message>(
       : sql`${sql(table)}."consumerName" = ${consumerName} AND ${sql(table)}."partitionKey" = ${partitionKey}`
   }
 
-  let isLegacyAdopted = false
+  const adoptsLegacyMessages = partitionKey === undefined || partitionKey === 'default'
   const adoptLegacyMessages = async () => {
-    if (isLegacyAdopted) {
-      return
+    if (adoptsLegacyMessages) {
+      await getSql()`
+        UPDATE "asyncOutbox"
+        SET "partitionKey" = 'default'
+        WHERE "consumerName" = ${consumerName} AND "partitionKey" IS NULL AND "delivered" = false
+      `
     }
-
-    await getSql()`
-      UPDATE "asyncOutbox"
-      SET "partitionKey" = ${partitionKey ?? 'default'}
-      WHERE "consumerName" = ${consumerName} AND "partitionKey" IS NULL AND "delivered" = false
-    `
-    isLegacyAdopted = true
   }
 
   return {
@@ -111,6 +111,7 @@ const createPollingStore = <Message>(
                 WHERE p."consumerName" = "asyncOutbox"."consumerName"
                   AND p."partitionKey" = "asyncOutbox"."partitionKey"
                   AND p."claimedBy" = ${owner}
+                FOR SHARE
               )
             )
           )
@@ -126,6 +127,7 @@ const createPollingStore = <Message>(
         WHERE "position" IN (
           SELECT "position" FROM "asyncOutbox"
           WHERE ${inScope('asyncOutbox')}
+            AND "partitionKey" IS NOT NULL
             AND "delivered" = false
             AND ("nextAttemptAt" IS NULL OR "nextAttemptAt" <= now())
             AND ("claimedUntil" IS NULL OR "claimedUntil" < now())

@@ -704,7 +704,7 @@ Pass the partition key when queueing a message. Each consumer publishes only the
 await outbox.queue(event, { partitionKey: 'partition-A', tx: sql })
 ```
 
-The partition key defaults to `'default'`. Since `1.0.0-alpha.19`, any partition key works (e.g. `tenant-1`); earlier versions accept only lowercase letters, digits and `_` in `consumerName` and `partitionKey`. See [Multi-tenancy](/pages/multi-tenancy.md) for running one partition per tenant.
+The partition key of `queue()` and `send()` defaults to the `partitionKey` of the consumer, or to `'default'` when the consumer has none. Up to `1.0.0-alpha.19`, it was always `'default'`, so a consumer with a `partitionKey` did not publish the messages queued without one. Since `1.0.0-alpha.19`, any partition key works (e.g. `tenant-1`); earlier versions accept only lowercase letters, digits and `_` in `consumerName` and `partitionKey`. See [Multi-tenancy](/pages/multi-tenancy.md) for running one partition per tenant.
 
 ### Monitoring and Observability
 
