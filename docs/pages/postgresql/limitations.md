@@ -25,6 +25,8 @@ A consumer that cannot publish (e.g. the message broker is down) stops reading t
 
 ➡️ We can achieve scaling of message delivery by **partitioning** (each partition is a separate Replication Slot)
 
+➡️ Keep in mind that every slot decodes all the inserts into the outbox table, and each consumer skips the messages of other partitions. Partitioning spreads the publishing, not the decoding work of PostgreSQL
+
 ➡️ Although there are no performance tests yet, the Logical Replication is a native mechanism of PostgreSQL which is not implemented on the pull (like MongoDB Change Streams) but rather on the pub/sub mechanism, so it’s performant by design as it takes off the necessity of performing countless I/O requests to the database.
 
 ➡️ Taking that into account, one instance of your app should be able to process many messages at the same time

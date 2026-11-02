@@ -698,7 +698,13 @@ const outboxB = createOutboxConsumer({
 })
 ```
 
-Messages are routed based on partition key, allowing parallel processing.
+Pass the partition key when queueing a message. Each consumer publishes only the messages of its partition:
+
+```typescript
+await outbox.queue(event, { partitionKey: 'partition-A', tx: sql })
+```
+
+The partition key defaults to `'default'`. Since `1.0.0-alpha.19`, any partition key works (e.g. `tenant-1`); earlier versions accept only lowercase letters, digits and `_` in `consumerName` and `partitionKey`.
 
 ### Monitoring and Observability
 

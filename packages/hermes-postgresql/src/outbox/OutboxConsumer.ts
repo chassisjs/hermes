@@ -313,7 +313,13 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
     const onPublish = async ({ transaction, acknowledge }: MessageToPublish<InsertResult>) => {
       assert(this._state)
 
-      const messages = transaction.results.map<HermesMessageEnvelope<Message>>((result) => ({
+      const results = transaction.results.filter((result) => result.partitionKey === partitionKey)
+
+      if (results.length === 0) {
+        return
+      }
+
+      const messages = results.map<HermesMessageEnvelope<Message>>((result) => ({
         position: result.position,
         messageId: result.messageId,
         messageType: result.messageType,
