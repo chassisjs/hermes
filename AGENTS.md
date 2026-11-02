@@ -33,32 +33,37 @@ hermes/
 
 - **Location:** `packages/hermes`
 - **Description:** Core package with shared utilities, types, and base functionality
-- **Main Dependencies:** `uuid@~13.0.0`
+- **Main Dependencies:** `uuid@~14.0.3`
+- **Node:** `>=18.20.3` (`engines`)
 - **Exports:** `./lib/index.cjs` (CommonJS), `./lib/index.mjs` (ESM)
 
 #### @chassisjs/hermes-mongodb
 
 - **Location:** `packages/hermes-mongodb`
 - **Description:** MongoDB-specific Outbox Pattern implementation
-- **Dependencies:** `whatwg-url@^15.1.0`
+- **Dependencies:** `whatwg-url@^16.0.1`
 - **Peer Dependencies:** `@chassisjs/hermes@~1.0.0-alpha.15`, `mongodb@>= 6.8.0 || < 7.0.0`
+- **Node:** `>=18.20.3` (`engines`)
 
 #### @chassisjs/hermes-postgresql
 
 - **Location:** `packages/hermes-postgresql`
 - **Description:** PostgreSQL-specific Outbox Pattern implementation using logical replication
-- **Dependencies:** `fp-ts@~2.16.11`, `postgres@~3.4.7`, `nodemon@~3.1.11`
+- **Dependencies:** `fp-ts@~2.16.11`, `postgres@~4.0.0`, `nodemon@~3.1.14`
 - **Peer Dependencies:** `@chassisjs/hermes@~1.0.0-alpha.15`
+- **Node:** `^20.19.0 || >=22.12.0` (`engines`). `postgres@4` (Postgres.js) is ESM-only, so the CommonJS build (`lib/index.cjs`) needs `require(esm)`, which Node enables by default from 20.19 and 22.12
+- **Own types:** `JSONValue`, `QueryExecutor` and `OutboxTransaction` are defined in Hermes (`src/common/types.ts`); Postgres.js 4 no longer exports `JSONValue`
 
 ## Build System
 
 ### Technology Stack
 
 - **Package Manager:** npm with workspaces
-- **Monorepo Tool:** Lerna 9.x
+- **Monorepo Tool:** Lerna 10.x
 - **Bundler:** Rollup with TypeScript plugin
-- **TypeScript:** 5.9.3
-- **Node Version:** >=20.9.0 (defined in .nvmrc)
+- **TypeScript:** 6.0 (TypeScript 7 and ESLint 10 are blocked by the peer dependencies of `typescript-eslint` and `eslint-plugin-import`)
+- **Node Version:** 26 LTS (`v26.13.0` in `.nvmrc`, used by all CI workflows; the examples have their own `.nvmrc`)
+- **Tests:** Jest 30 with `ts-jest`
 
 ### Build Configuration
 
@@ -166,7 +171,7 @@ npm run version:alpha
 
 ### Current Version
 
-The monorepo is currently at version `1.0.0-alpha.15`.
+`lerna.json` is at `1.0.0-alpha.18`. Lerna bumps only the packages that changed since the last tag, so the packages can be at different versions (e.g. `hermes-postgresql` `1.0.0-alpha.18`, `hermes-mongodb` `1.0.0-alpha.16`).
 
 ## Deployment Process
 
@@ -338,6 +343,30 @@ typescript({
 
 **Solution:** Same as above - ensure `outputToFilesystem: true` and `declaration: true` are set in rollup config.
 
+### Issue: `lerna publish` / `npm run deploy` fails at the end with `lifecycle "publish" errored`
+
+**Cause:** The root `package.json` has a script named `publish`. Lerna runs it as an npm lifecycle hook, so it starts a nested `lerna publish from-package`, which fails with `EUNCOMMIT` on the temporary `gitHead` change in the package's `package.json`.
+
+**Solution:** Check the registry first: the package may already be published. `npm view` can show a cached state for a few minutes, so query `https://registry.npmjs.org/<package>` directly. Revert the `gitHead` change (`git checkout -- packages/*/package.json`) and, if needed, publish with `npx lerna publish from-package --yes --ignore-scripts`. Renaming the root `publish` script (and the CI workflow that calls it) fixes it for good.
+
+### Issue: Tests fail with "Cannot find module 'jest-util'"
+
+**Cause:** Since `ts-jest@29.4.15`, `jest-util` is an optional peer dependency, so npm does not hoist it anymore.
+
+**Solution:** Keep `jest-util` in the root `devDependencies`, at the version matching `jest`.
+
+### Issue: TypeScript 6 errors TS5101 (`baseUrl` is deprecated) or TS5011 (`rootDir` must be set)
+
+**Solution:** Do not use `baseUrl`; `paths` are resolved relative to the `tsconfig` file. Set `rootDir` explicitly when `outDir` is set and the sources are in more than one directory (e.g. `src` and `test` in `tsconfig.jest.json`).
+
+### Issue: Updating dependencies
+
+Use `ncu --peer -w` (all workspaces and the root). Upgrade minor/patch versions first (`--target minor`), then majors one by one, running lint, build and the tests of all packages after each step. `ncu` 23 with `--peer` and `--filter` may still propose versions that break peer dependencies (e.g. TypeScript 7), so check what it proposes. `overrides` in the root `package.json` pin the `typescript-eslint` family; keep all of them at the same version.
+
+### Issue: Tests need Docker
+
+The PostgreSQL integration tests start PostgreSQL with Testcontainers, so Docker has to be running.
+
 ## Important Files
 
 - `lerna.json` - Lerna configuration and current version
@@ -356,6 +385,7 @@ The project uses:
 - **Commitlint** for conventional commits
 - **Commit message format:** Follows conventional commits specification
 - **Lerna commit messages:** `chore(release): set \`package.json\` to X.X.X [skip ci]`
+- **Pre-commit hook:** runs `npm run lint`, `npm run lint:prettier` and `npm install --package-lock-only`, so a commit can change `package-lock.json`
 
 ## Development Workflow Summary
 
@@ -370,16 +400,16 @@ The project uses:
 
 ```
 @chassisjs/hermes (core)
-    ├── uuid@~13.0.0
+    ├── uuid@~14.0.3
     │
     ├── @chassisjs/hermes-mongodb (depends on core)
-    │   ├── whatwg-url@^15.1.0
+    │   ├── whatwg-url@^16.0.1
     │   └── mongodb@>= 6.8.0 (peer)
     │
     └── @chassisjs/hermes-postgresql (depends on core)
         ├── fp-ts@~2.16.11
-        ├── postgres@~3.4.7
-        └── nodemon@~3.1.11
+        ├── postgres@~4.0.0 (ESM-only)
+        └── nodemon@~3.1.14
 ```
 
 ## Key Takeaways for Agents
@@ -392,6 +422,7 @@ The project uses:
 6. **Lerna manages versions** - Don't manually edit version numbers; use `npm run version:X` commands
 7. **Git tags matter** - Lerna creates tags like `v1.0.0-alpha.15` which should be pushed to GitHub
 8. **CI/CD requires version first** - The GitHub Actions workflow publishes existing versions, so version locally first
+9. **Do not use comments over code unless it is absolutely needed**. Write JSDoc for live documentation.
 
 ## Support and Resources
 
