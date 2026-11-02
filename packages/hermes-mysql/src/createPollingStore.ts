@@ -5,7 +5,7 @@ import {
   type PolledMessage,
 } from '@chassisjs/hermes'
 import { type Pool, type RowDataPacket } from 'mysql2/promise'
-import { inTransaction, OutboxTable, PartitionTable } from './sql.js'
+import { inTransaction, OutboxTable, PartitionTable, writeReadCommitted } from './sql.js'
 
 type OutboxRow<Message> = RowDataPacket & {
   position: string | number
@@ -41,7 +41,10 @@ const microseconds = (duration: Duration) => Math.round(duration.ms * 1000)
  * would wait for the open transactions of the application. It does it before the claim, in other statements, so it
  * does not hold the locks of the partitions while it claims them. The next poll adds a removed partition again when
  * it gets new messages, so a message that commits during the removal is not lost. Every statement that changes rows
- * runs in a `READ COMMITTED` transaction, which locks only the rows it changes, not the gaps between them.
+ * runs in a `READ COMMITTED` transaction, which locks only the rows it changes, not the gaps between them. The
+ * statements change rows found by their primary key (found first with a plain `SELECT` when needed): an `UPDATE` that
+ * scans a secondary index waits for the rows that the application inserted and did not commit yet, even in
+ * `READ COMMITTED`.
  *
  * `markFailed` changes a message only when `owner` still has the claim of the message, or of its partition when the
  * message itself is not claimed (`usePartitionOrderingPolicy`).
@@ -72,7 +75,8 @@ const createPollingStore = <Message>(
 
   return {
     async markDelivered(message) {
-      await getPool().query(
+      await writeReadCommitted(
+        getPool(),
         `UPDATE \`${OutboxTable}\`
          SET \`delivered_at\` = NOW(6), \`claimed_by\` = NULL, \`claimed_until\` = NULL
          WHERE \`position\` = ? AND \`delivered_at\` IS NULL`,
@@ -81,7 +85,8 @@ const createPollingStore = <Message>(
     },
 
     async markFailed(message, { retryAfter, owner }) {
-      await getPool().query(
+      await writeReadCommitted(
+        getPool(),
         `UPDATE \`${OutboxTable}\`
          SET \`attempts\` = \`attempts\` + 1,
              \`next_attempt_at\` = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND),
@@ -135,7 +140,8 @@ const createPollingStore = <Message>(
     },
 
     async renewMessages({ owner, lease, messages }) {
-      await getPool().query(
+      await writeReadCommitted(
+        getPool(),
         `UPDATE \`${OutboxTable}\`
          SET \`claimed_until\` = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND)
          WHERE \`position\` IN (?) AND \`claimed_by\` = ? AND \`delivered_at\` IS NULL`,
@@ -145,13 +151,21 @@ const createPollingStore = <Message>(
 
     async releaseMessages({ owner }) {
       const { where, params } = inScope('m')
-
-      await getPool().query(
-        `UPDATE \`${OutboxTable}\` m
-         SET m.\`claimed_by\` = NULL, m.\`claimed_until\` = NULL
+      const [rows] = await getPool().query<RowDataPacket[]>(
+        `SELECT m.\`position\` FROM \`${OutboxTable}\` m
          WHERE ${where} AND m.\`claimed_by\` = ? AND m.\`delivered_at\` IS NULL`,
         [...params, owner],
       )
+
+      if (rows.length) {
+        await writeReadCommitted(
+          getPool(),
+          `UPDATE \`${OutboxTable}\`
+           SET \`claimed_by\` = NULL, \`claimed_until\` = NULL
+           WHERE \`position\` IN (?) AND \`claimed_by\` = ? AND \`delivered_at\` IS NULL`,
+          [rows.map(({ position }) => position), owner],
+        )
+      }
     },
 
     async claimPartitions({ owner, lease, limit }) {
@@ -256,7 +270,8 @@ const createPollingStore = <Message>(
     },
 
     async renewPartitions({ owner, lease, partitionKeys }) {
-      await getPool().query(
+      await writeReadCommitted(
+        getPool(),
         `UPDATE \`${PartitionTable}\`
          SET \`claimed_until\` = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND)
          WHERE \`consumer_name\` = ? AND \`partition_key\` IN (?) AND \`claimed_by\` = ?`,
@@ -267,7 +282,8 @@ const createPollingStore = <Message>(
     async releasePartitions({ owner }) {
       const { where, params } = inScope('p')
 
-      await getPool().query(
+      await writeReadCommitted(
+        getPool(),
         `UPDATE \`${PartitionTable}\` p
          SET p.\`claimed_by\` = NULL, p.\`claimed_until\` = NULL
          WHERE ${where} AND p.\`claimed_by\` = ?`,

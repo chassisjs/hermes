@@ -14,6 +14,14 @@ type Migration = {
   statements: string[]
 }
 
+/**
+ * The migrations of the Hermes tables, in the order of their versions. Never change a released migration: add a new
+ * version instead.
+ *
+ * Version 1 was changed before the first release of the package (`1.0.0-alpha.20`): the binary collation of the keys
+ * and the `idx_hermes_outbox_pending_partitions` index were added to it. A database migrated by an unreleased build of
+ * the `feat/polling-outbox` branch has version 1 without them, so drop its `hermes_*` tables.
+ */
 const migrations: Migration[] = [
   {
     version: 1,

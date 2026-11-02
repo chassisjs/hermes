@@ -185,7 +185,9 @@ type OutboxConsumer<Message extends JSONValue> = {
   queue(message: MessageEnvelope<Message> | MessageEnvelope<Message>[], options?: PublishOptions): Promise<void>
 
   /**
-   * Returns the pool of Hermes.
+   * Returns the pool of Hermes. `stop()` closes it, and the next `start()` or `queue()` creates a new one, so get the
+   * pool again after a restart. A failed `start()` does not close the pool once it was used by `queue()` or returned by
+   * this method.
    */
   getDbConnection(): Pool
 }

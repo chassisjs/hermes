@@ -589,4 +589,26 @@ describe('Review fixes', () => {
       await outbox.getDbConnection().end()
     })
   })
+
+  test('releasing the claims does not wait for the open transactions of the application', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const outbox = createConsumer(options, () => {}, { ordering: 'none' })
+      const stop = await outbox.start()
+      const connection = await pool.getConnection()
+
+      try {
+        await connection.beginTransaction()
+        await outbox.queue(envelope('uncommitted'), { tx: connection })
+
+        const startedAt = Date.now()
+
+        await stop()
+
+        expect(Date.now() - startedAt).toBeLessThan(Duration.ofSeconds(5).ms)
+      } finally {
+        await connection.rollback()
+        connection.release()
+      }
+    })
+  })
 })

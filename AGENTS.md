@@ -54,8 +54,8 @@ hermes/
 - **Dependencies:** `mysql2@~3.24.6`
 - **Peer Dependencies:** `@chassisjs/hermes` (needs the polling outbox; raise the range in the release like for hermes-postgresql)
 - **Node:** `>=18.20.3` (`engines`)
-- **Tables:** `hermes_outbox`, `hermes_outbox_partition`, `hermes_migrations`. Migrations are versioned in `src/migrate.ts` and run under `GET_LOCK`. MySQL commits DDL at once, so every migration has to be safe to run again (`CREATE TABLE IF NOT EXISTS`, indexes inside `CREATE TABLE`)
-- **Claims:** `SELECT ... FOR UPDATE SKIP LOCKED` in `READ COMMITTED` transactions, so that they do not lock gaps and block the inserts of the application
+- **Tables:** `hermes_outbox`, `hermes_outbox_partition`, `hermes_migrations`. Migrations are versioned in `src/migrate.ts` and run under `GET_LOCK`. Never change a released migration; add a new version. Version 1 was changed before the first release, so databases migrated by unreleased builds need their `hermes_*` tables dropped. MySQL commits DDL at once, so every migration has to be safe to run again (`CREATE TABLE IF NOT EXISTS`, indexes inside `CREATE TABLE`)
+- **Claims:** `SELECT ... FOR UPDATE SKIP LOCKED` in `READ COMMITTED` transactions, so that they do not lock gaps and block the inserts of the application. Every other write is its own `READ COMMITTED` statement that changes rows by their primary key: an `UPDATE` that scans a secondary index waits for uncommitted rows of the application even in `READ COMMITTED`, and a subquery of `INSERT ... SELECT`/`DELETE` locks the rows it reads, so find the rows with a plain `SELECT` first
 - **Tests:** Testcontainers with `mysql:8.0` (Aurora MySQL 3 is 8.0 compatible); `MYSQL_VERSION=8.4 npm test -w packages/hermes-mysql` runs them on another version
 
 #### @chassisjs/hermes-postgresql

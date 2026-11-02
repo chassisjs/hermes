@@ -32,6 +32,22 @@ const inTransaction = async <T>(pool: Pool, work: (connection: PoolConnection) =
   }
 }
 
+/**
+ * Runs one statement that changes rows, as its own `READ COMMITTED` transaction: `SET TRANSACTION` applies to the next
+ * transaction of the connection, which is the statement itself in the autocommit mode. So the statement locks only the
+ * rows it changes, not the gaps between them, and does not block the inserts of the application.
+ */
+const writeReadCommitted = async (pool: Pool, text: string, params: unknown[]) => {
+  const connection = await pool.getConnection()
+
+  try {
+    await connection.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+    await connection.query(text, params)
+  } finally {
+    connection.release()
+  }
+}
+
 type Column = { name: string; placeholder?: string }
 
 const chunksOf = <T>(items: T[], size: number) =>
@@ -82,4 +98,5 @@ export {
   MigrationTable,
   OutboxTable,
   PartitionTable,
+  writeReadCommitted,
 }

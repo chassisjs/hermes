@@ -48,11 +48,22 @@ const createOutboxConsumer = <Message extends JSONValue>(
 ): OutboxConsumer<Message> => {
   const { consumerName, partitionKey } = params
   let pool: Pool | null = null
+  let isPoolShared = false
   let isStarted = false
   const getPool = () => {
-    pool ??= createPool({ ...params.getOptions(), supportBigNumbers: true, bigNumberStrings: true })
+    if (!pool) {
+      pool = createPool({ ...params.getOptions(), supportBigNumbers: true, bigNumberStrings: true })
+      isPoolShared = false
+    }
 
     return pool
+  }
+  const getSharedPool = () => {
+    const shared = getPool()
+
+    isPoolShared = true
+
+    return shared
   }
   const closePool = async () => {
     const closing = pool
@@ -67,8 +78,6 @@ const createOutboxConsumer = <Message extends JSONValue>(
 
       isStarted = true
 
-      const hadPool = pool !== null
-
       try {
         if (params.migrate !== false) {
           await migrate(getPool())
@@ -76,7 +85,7 @@ const createOutboxConsumer = <Message extends JSONValue>(
       } catch (error) {
         isStarted = false
 
-        if (!hadPool) {
+        if (!isPoolShared) {
           await closePool().catch(() => {})
         }
 
@@ -127,7 +136,7 @@ const createOutboxConsumer = <Message extends JSONValue>(
       const messages = Array.isArray(message) ? message : [message]
 
       await insertRowsAtomically(
-        getPool(),
+        getSharedPool(),
         options?.tx,
         OutboxTable,
         [
@@ -147,7 +156,7 @@ const createOutboxConsumer = <Message extends JSONValue>(
       )
     },
 
-    getDbConnection: getPool,
+    getDbConnection: getSharedPool,
   }
 }
 
