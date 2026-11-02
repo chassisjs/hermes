@@ -502,8 +502,8 @@ type ConsumerCreationParams<Event> = {
    * MongoDB database instance where the outbox will operate.
    *
    * The outbox will create two collections in this database:
-   * - `hermes_outbox_messages` - Stores outgoing events
-   * - `hermes_outbox_consumers` - Stores consumer state
+   * - `__outboxMessages` - Stores outgoing events
+   * - `__outboxConsumers` - Stores consumer state
    *
    * @example
    * ```typescript

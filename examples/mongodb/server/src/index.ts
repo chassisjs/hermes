@@ -136,7 +136,7 @@ const stopDeps = async () => {
 
     spinner.succeed()
 
-    outbox.start()
+    await outbox.start()
 
     console.log(chalk.green(`Everything is set!\r\n`))
     console.log(

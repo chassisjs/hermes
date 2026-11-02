@@ -44,7 +44,7 @@ import { generateVersionPolicies } from './versionPolicies.js'
  * @example
  * ### Basic Setup
  * ```typescript
- * import { createOutboxConsumer } from '@arturwojnar/hermes-mongodb'
+ * import { createOutboxConsumer } from '@chassisjs/hermes-mongodb'
  * import { MongoClient } from 'mongodb'
  *
  * type DomainEvent =

@@ -11,7 +11,7 @@ npm i @chassisjs/hermes @chassisjs/hermes-mongodb
 ➡️ **7**.x.x 😛\
 ➡️ **8**.0.0-rc.x 😎
 
-If you don't belive it, check how these☝️ versions are covered by tests [here](https://github.com/chassisjs/hermes/blob/main/packages/hermes-mongodb/test/simple.test.ts#L14)!
+If you don't believe it, check how these☝️ versions are covered by tests [here](https://github.com/chassisjs/hermes/blob/main/packages/hermes-mongodb/test/simple.test.ts#L14)!
 
 ## 📒 API
 
@@ -21,6 +21,6 @@ If you don't belive it, check how these☝️ versions are covered by tests [her
 
 The implementation is based on the `MongoDB Change Streams`, so internally the `oplog` is used.\
 The `oplog` gets removed _if it passes the specified time period or if the oplog reaches the maximum size_.\
-So, _if your event are not processed successfully by then, you will loose them_.
+So, _if your events are not processed successfully by then, Hermes will not stream them anymore_. They stay in the `__outboxMessages` collection, but you have to replay them on your own.
 
 See the [official docs](https://www.mongodb.com/docs/manual/core/replica-set-oplog/).

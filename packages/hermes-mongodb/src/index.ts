@@ -11,18 +11,18 @@
  * - ✅ **Real-time streaming** via Change Streams (no polling)
  * - ✅ **Transactional consistency** between data and events
  * - ✅ **Horizontal scaling** with partition keys
- * - ✅ **Replica set support** (MongoDB 4.0+)
+ * - ✅ **Replica set support** (MongoDB 5.0+)
  *
  * ## Installation
  *
  * ```bash
- * npm install @arturwojnar/hermes @arturwojnar/hermes-mongodb
+ * npm install @chassisjs/hermes @chassisjs/hermes-mongodb
  * ```
  *
  * ## Quick Start
  *
  * ```typescript
- * import { createOutboxConsumer } from '@arturwojnar/hermes-mongodb'
+ * import { createOutboxConsumer } from '@chassisjs/hermes-mongodb'
  * import { MongoClient } from 'mongodb'
  *
  * type DomainEvent =
@@ -172,7 +172,7 @@
  *
  * ## Links
  *
- * - [GitHub Repository](https://github.com/arturwojnar/hermes)
+ * - [GitHub Repository](https://github.com/chassisjs/hermes)
  * - [Documentation](https://docs.hermesjs.tech)
  * - [MongoDB Change Streams](https://www.mongodb.com/docs/manual/changeStreams/)
  *
