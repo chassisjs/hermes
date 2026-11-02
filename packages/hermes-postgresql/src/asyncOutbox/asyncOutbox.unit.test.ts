@@ -64,5 +64,20 @@ describe('AsyncOutboxConsumer', () => {
       await consumer.stop()
       await consumer.start()()
     })
+
+    test('the stop function of an earlier start does not stop a later one', async () => {
+      const consumer = createConsumer(() => createMockSql())
+      const stopFirst = consumer.start()
+
+      await stopFirst()
+
+      const stopSecond = consumer.start()
+
+      await stopFirst()
+
+      expect(() => consumer.start()).toThrow(/already started/)
+
+      await stopSecond()
+    })
   })
 })

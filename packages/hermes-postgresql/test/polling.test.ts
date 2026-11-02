@@ -9,6 +9,7 @@ import {
   HermesMessageEnvelope,
   useBasicAsyncOutboxConsumerPolicy,
 } from '../src/index.js'
+import { createPollingStore } from '../src/asyncOutbox/createPollingStore.js'
 import { migrate } from '../src/outbox/migrate.js'
 import { generateEvent, MedicineEvent } from './events.js'
 import { postgres } from './postgresql.js'
@@ -238,18 +239,18 @@ describe('Async outbox', () => {
         await outbox1.send(envelope('async-2'), { tx, partitionKey: 'tenant-2' })
       })
       await sql.begin(async (tx) => {
-        await outbox2.send(envelope('async-default'), tx)
+        await outbox2.send(envelope('async-own'), tx)
       })
 
-      await waitUntil(() => published['tenant-1'].length + published['tenant-2'].length === 2)
+      await waitUntil(() => published['tenant-1'].length + published['tenant-2'].length === 3)
       await setTimeout(300)
 
-      expect(published).toEqual({ 'tenant-1': ['async-1'], 'tenant-2': ['async-2'] })
+      expect(published).toEqual({ 'tenant-1': ['async-1'], 'tenant-2': ['async-2', 'async-own'] })
       expect(await sql`SELECT "messageId", "partitionKey", "delivered" FROM "asyncOutbox" ORDER BY "position"`).toEqual(
         [
           { messageId: 'async-1', partitionKey: 'tenant-1', delivered: true },
           { messageId: 'async-2', partitionKey: 'tenant-2', delivered: true },
-          { messageId: 'async-default', partitionKey: 'default', delivered: false },
+          { messageId: 'async-own', partitionKey: 'tenant-2', delivered: true },
         ],
       )
 
@@ -292,6 +293,100 @@ describe('Async outbox', () => {
 
       expect(published).toEqual(['old'])
       expect(await sql`SELECT "partitionKey" FROM "asyncOutbox"`).toEqual([{ partitionKey: 'default' }])
+    })
+  })
+
+  test('stopping the consumer waits for the async outbox before it closes the connection', async () => {
+    await postgres(async (sql, container) => {
+      let isPublishing = false
+      const outbox = createOutboxConsumer<MedicineEvent>({
+        getOptions: () => getOptions(container),
+        publish: async () => {
+          isPublishing = true
+          await setTimeout(300)
+        },
+        consumerName: 'app',
+        asyncOutbox: useBasicAsyncOutboxConsumerPolicy(checkInterval),
+      })
+      const stop = await outbox.start()
+
+      await outbox.send(envelope('in-flight'))
+      await waitUntil(() => isPublishing)
+      await stop()
+
+      expect(await sql`SELECT "delivered", "claimedBy" FROM "asyncOutbox"`).toEqual([
+        { delivered: true, claimedBy: null },
+      ])
+      expect(await sql`SELECT "claimedBy" FROM "asyncOutboxPartition" WHERE "claimedBy" IS NOT NULL`).toEqual([])
+    })
+  })
+
+  test('a failure reported after the claim expired keeps the claim of another instance', async () => {
+    await postgres(async (sql) => {
+      await migrate(sql, 'hermes_slot_app_default')
+
+      const store = createPollingStore<MedicineEvent>(() => sql as never, { consumerName: 'app' })
+
+      await createAsyncOutbox(sql, () => {}).send(envelope('m1'))
+
+      const [claimedByFirst] = await store.claimMessages({
+        owner: 'first',
+        lease: Duration.ofMiliseconds(50),
+        limit: 1,
+      })
+
+      await setTimeout(100)
+
+      const [claimedBySecond] = await store.claimMessages({ owner: 'second', lease: Duration.ofSeconds(30), limit: 1 })
+
+      expect(claimedBySecond.messageId).toBe('m1')
+
+      await store.markFailed(claimedByFirst, { retryAfter: Duration.ofSeconds(1), owner: 'first' })
+
+      expect(await sql`SELECT "claimedBy", "failsCount", "nextAttemptAt" FROM "asyncOutbox"`).toEqual([
+        { claimedBy: 'second', failsCount: 0, nextAttemptAt: null },
+      ])
+
+      await store.markDelivered(claimedBySecond)
+      await store.markFailed(claimedBySecond, { retryAfter: Duration.ofSeconds(1), owner: 'second' })
+
+      expect(await sql`SELECT "delivered", "failsCount" FROM "asyncOutbox"`).toEqual([
+        { delivered: true, failsCount: 0 },
+      ])
+    })
+  })
+
+  test('finds the partitions with undelivered messages and removes the empty ones', async () => {
+    await postgres(async (sql) => {
+      await migrate(sql, 'hermes_slot_app_default')
+
+      const store = createPollingStore<MedicineEvent>(() => sql as never, { consumerName: 'app' })
+      const outbox = createAsyncOutbox(sql, () => {})
+      const partitions = async () =>
+        (await sql<{ partitionKey: string }[]>`SELECT "partitionKey" FROM "asyncOutboxPartition" ORDER BY 1`).map(
+          ({ partitionKey }) => partitionKey,
+        )
+
+      for (const partitionKey of ['a', 'b', 'c']) {
+        await outbox.send([envelope(`${partitionKey}1`), envelope(`${partitionKey}2`)], { partitionKey })
+      }
+
+      expect(await store.claimPartitions({ owner: 'first', lease: Duration.ofSeconds(30), limit: 10 })).toEqual(
+        expect.arrayContaining(['a', 'b', 'c']),
+      )
+      expect(await partitions()).toEqual(['a', 'b', 'c'])
+
+      for (const message of await store.readPartition({ partitionKey: 'b', limit: 10 })) {
+        await store.markDelivered(message)
+      }
+      await store.releasePartitions({ owner: 'first' })
+      await store.claimPartitions({ owner: 'first', lease: Duration.ofSeconds(30), limit: 10 })
+
+      expect(await partitions()).toEqual(['a', 'c'])
+
+      await store.releasePartitions({ owner: 'first' })
+
+      expect(await sql`SELECT "claimedBy" FROM "asyncOutboxPartition" WHERE "claimedBy" IS NOT NULL`).toEqual([])
     })
   })
 })

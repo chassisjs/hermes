@@ -40,7 +40,7 @@ type HermesAsyncMessageEnvelope<Message> = {
 type PublishOptions = {
   /** Optional transaction for atomic operations */
   tx?: OutboxTransaction
-  /** The partition of the messages (default: `'default'`) */
+  /** The partition of the messages (default: the `partitionKey` of the consumer, or `'default'`) */
   partitionKey?: string
 }
 
@@ -277,7 +277,7 @@ class AsyncOutboxConsumer<Message extends JSONValue> implements IAsyncOutboxCons
     }
 
     const messages = Array.isArray(message) ? message : [message]
-    const partitionKey = options?.partitionKey || 'default'
+    const partitionKey = options?.partitionKey || this._params.partitionKey || 'default'
 
     await insertRowsAtomically(
       this._getSql(),
@@ -335,7 +335,7 @@ class AsyncOutboxConsumer<Message extends JSONValue> implements IAsyncOutboxCons
     const { consumerName, partitionKey, ordering, batchSize, lease } = this._params
     const store = createPollingStore<Message>(this._getSql, { consumerName, partitionKey })
 
-    this._stop = createPollingOutbox<Message>({
+    const stop = createPollingOutbox<Message>({
       policy: ordering === 'none' ? useNoOrderingPolicy(store) : usePartitionOrderingPolicy(store),
       publish: async (message) => {
         await this._params.publish(toEnvelope(message))
@@ -348,7 +348,15 @@ class AsyncOutboxConsumer<Message extends JSONValue> implements IAsyncOutboxCons
       onDbError: this._params.onDbError,
     }).start()
 
-    return (() => this.stop()) as Stop
+    this._stop = stop
+
+    return (async () => {
+      if (this._stop === stop) {
+        this._stop = null
+      }
+
+      await stop()
+    }) as Stop
   }
 
   /**

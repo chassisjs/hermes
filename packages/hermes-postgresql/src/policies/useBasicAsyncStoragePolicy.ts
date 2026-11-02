@@ -61,8 +61,8 @@ type UseAsyncOutboxPolicy<Message extends JSONValue> = (
  * - **Lower priority** - Doesn't compete with critical message processing
  * - **Flexible timing** - Poll interval can be adjusted
  *
- * The async outbox of a consumer publishes only the messages of the consumer's partition, so pass the same
- * `partitionKey` to `send()` as to the consumer. It does not keep a position like "the last published position", so a
+ * The async outbox of a consumer publishes only the messages of the consumer's partition, and `send()` stores the
+ * messages in that partition unless you pass another `partitionKey`. It does not keep a position like "the last published position", so a
  * message is not skipped when its transaction commits after a transaction with a greater position.
  *
  * @param checkInterval - How often to poll for new messages (default: 15 seconds)

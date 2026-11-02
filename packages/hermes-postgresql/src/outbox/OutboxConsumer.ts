@@ -451,12 +451,11 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
 
       await Promise.race([publishingQueue.dispose(), setTimeout(Duration.ofSeconds(5).ms)])
 
+      await swallow(() => (asyncOutboxStop ? asyncOutboxStop() : Promise.resolve()))
       await swallow(() => killReplicationProcesses(this._sql!, slotName))
       await Promise.all([
         swallow(() => this._sql?.end({ timeout })),
-
         Promise.race([swallow(() => subscribeSql?.end({ timeout })), setTimeout(timeout)]),
-        swallow(() => (asyncOutboxStop ? asyncOutboxStop() : Promise.resolve())),
       ])
 
       this._state = undefined
@@ -663,7 +662,8 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
    *
    * @param message - A single message or array of messages to send
    * @param txOrOptions - Optional transaction to use (a postgres.js transaction or a {@link QueryExecutor}), or
-   * {@link PublishOptions} with the transaction and the partition of the messages (default: `'default'`)
+   * {@link PublishOptions} with the transaction and the partition of the messages (default: the `partitionKey` of the
+   * consumer, or `'default'`)
    *
    * @returns Promise that resolves when message(s) are inserted into async outbox table
    *

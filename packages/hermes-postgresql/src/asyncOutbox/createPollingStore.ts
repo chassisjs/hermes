@@ -28,6 +28,11 @@ type PollingStoreScope = {
  *
  * The claims use `SELECT ... FOR UPDATE SKIP LOCKED`, and all the times are computed with the clock of PostgreSQL.
  *
+ * The partitions with undelivered messages are found with a skip scan of the `asyncOutboxPendingIdx` index (one index
+ * lookup per partition), so the cost of a poll does not grow with the number of undelivered messages. The partitions
+ * without undelivered messages are removed from `asyncOutboxPartition`; the next poll adds them again when they get
+ * new messages, so a message that commits during the removal is not lost.
+ *
  * @param getSql - Returns the connection to the database
  * @param scope - The consumer and, optionally, the partition whose messages the store reads
  */
@@ -63,11 +68,11 @@ const createPollingStore = <Message>(
       await getSql()`
         UPDATE "asyncOutbox"
         SET "delivered" = true, "sentAt" = now(), "claimedBy" = NULL, "claimedUntil" = NULL
-        WHERE "position" = ${message.id.toString()}
+        WHERE "position" = ${message.id.toString()} AND "delivered" = false
       `
     },
 
-    async markFailed(message, { retryAfter }) {
+    async markFailed(message, { retryAfter, owner }) {
       await getSql()`
         UPDATE "asyncOutbox"
         SET "failsCount" = COALESCE("failsCount", 0) + 1,
@@ -75,6 +80,8 @@ const createPollingStore = <Message>(
             "claimedBy" = NULL,
             "claimedUntil" = NULL
         WHERE "position" = ${message.id.toString()}
+          AND "delivered" = false
+          AND ("claimedBy" IS NULL OR "claimedBy" = ${owner})
       `
     },
 
@@ -122,10 +129,35 @@ const createPollingStore = <Message>(
       const sql = getSql()
 
       await sql`
+        WITH RECURSIVE "pending" AS (
+          (
+            SELECT m."partitionKey" FROM "asyncOutbox" m
+            WHERE ${inScope('m')} AND m."delivered" = false
+            ORDER BY m."partitionKey"
+            LIMIT 1
+          )
+          UNION ALL
+          SELECT (
+            SELECT m."partitionKey" FROM "asyncOutbox" m
+            WHERE ${inScope('m')} AND m."delivered" = false AND m."partitionKey" > "pending"."partitionKey"
+            ORDER BY m."partitionKey"
+            LIMIT 1
+          )
+          FROM "pending"
+          WHERE "pending"."partitionKey" IS NOT NULL
+        )
         INSERT INTO "asyncOutboxPartition" ("consumerName", "partitionKey")
-        SELECT DISTINCT "consumerName", "partitionKey" FROM "asyncOutbox"
-        WHERE ${inScope('asyncOutbox')} AND "delivered" = false
+        SELECT ${consumerName}, "partitionKey" FROM "pending" WHERE "partitionKey" IS NOT NULL
         ON CONFLICT DO NOTHING
+      `
+      await sql`
+        DELETE FROM "asyncOutboxPartition" p
+        WHERE ${inScope('p')}
+          AND (p."claimedUntil" IS NULL OR p."claimedUntil" < now())
+          AND NOT EXISTS (
+            SELECT 1 FROM "asyncOutbox" m
+            WHERE m."consumerName" = p."consumerName" AND m."partitionKey" = p."partitionKey" AND m."delivered" = false
+          )
       `
 
       const rows = await sql<{ partitionKey: string }[]>`
@@ -174,13 +206,11 @@ const createPollingStore = <Message>(
       `
     },
 
-    async releasePartitions({ owner, partitionKeys }) {
-      const sql = getSql()
-
-      await sql`
-        UPDATE "asyncOutboxPartition"
+    async releasePartitions({ owner }) {
+      await getSql()`
+        UPDATE "asyncOutboxPartition" p
         SET "claimedBy" = NULL, "claimedUntil" = NULL
-        WHERE "consumerName" = ${consumerName} AND "partitionKey" IN ${sql(partitionKeys)} AND "claimedBy" = ${owner}
+        WHERE ${inScope('p')} AND p."claimedBy" = ${owner}
       `
     },
   }
