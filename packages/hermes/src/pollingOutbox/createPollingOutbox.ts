@@ -34,6 +34,19 @@ import { type PollingLane, type PollingOutbox, type PollingOutboxParams } from '
  * await stop()
  * ```
  */
+/**
+ * Wraps a handler of the application, so an error it throws does not stop polling or crash the process.
+ */
+const ignoringErrors =
+  <Args extends unknown[]>(handler: ((...args: Args) => void) | undefined) =>
+  (...args: Args): void => {
+    try {
+      handler?.(...args)
+    } catch {
+      return
+    }
+  }
+
 const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): PollingOutbox => {
   const { policy, publish } = params
   const pollInterval = params.pollInterval ?? Duration.ofSeconds(1)
@@ -41,9 +54,10 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
   const lease = params.lease ?? Duration.ofSeconds(30)
   const retry = params.retry ?? useExponentialRetryPolicy()
   const owner = params.owner ?? randomUUID()
-  const onFailedPublish = params.onFailedPublish ?? noop
-  const onDbError = params.onDbError ?? noop
+  const onFailedPublish = ignoringErrors(params.onFailedPublish)
+  const onDbError = ignoringErrors(params.onDbError)
   let isStarted = false
+  let renewing: Promise<void> | undefined
 
   assert(Number.isInteger(batchSize) && batchSize >= 1, '`batchSize` has to be a positive integer.')
   assert(lease.ms > 0, '`lease` has to be longer than 0.')
@@ -81,7 +95,6 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
   }
 
   const publishLanes = async (lanes: PollingLane<Message>[], stopping: AbortSignal) => {
-    let renewing: Promise<void> | undefined
     const renewal = setInterval(
       () => {
         renewing ??= policy
@@ -98,6 +111,7 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
       await Promise.all(lanes.map((lane) => publishLane(lane, stopping)))
     } finally {
       clearInterval(renewal)
+      await renewing
     }
   }
 

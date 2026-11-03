@@ -319,6 +319,38 @@ describe('createPollingOutbox with usePartitionOrderingPolicy', () => {
     expect(overlapped).toBe(false)
   })
 
+  test('stop releases the partitions after the renewal in progress ends', async () => {
+    const { store, add } = createInMemoryStore()
+    const events: string[] = []
+
+    add(1)
+
+    const stop = createPollingOutbox({
+      ...fast,
+      lease: Duration.ofMiliseconds(30),
+      owner: 'first',
+      policy: usePartitionOrderingPolicy({
+        ...store,
+        renewPartitions: async (params) => {
+          events.push('renewal started')
+          await setTimeout(100)
+          await store.renewPartitions(params)
+          events.push('renewal ended')
+        },
+        releasePartitions: async (params) => {
+          events.push('released')
+          await store.releasePartitions(params)
+        },
+      }),
+      publish: () => setTimeout(20),
+    }).start()
+
+    await waitUntil(() => events.includes('renewal started'))
+    await stop()
+
+    expect(events.slice(-2)).toEqual(['renewal ended', 'released'])
+  })
+
   test('stop waits for the message being published and releases the partitions', async () => {
     const { store, add, rows, partitions } = createInMemoryStore()
     let release = () => {}
@@ -491,6 +523,47 @@ describe('createPollingOutbox', () => {
     await stop()
 
     expect(onDbError).toHaveBeenCalledTimes(2)
+  })
+
+  test('an error thrown by onDbError does not stop polling or reject unhandled', async () => {
+    const { store, add } = createInMemoryStore()
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    const published: string[] = []
+
+    process.on('unhandledRejection', onUnhandled)
+
+    try {
+      add(1)
+      add(2)
+
+      const stop = createPollingOutbox({
+        ...fast,
+        lease: Duration.ofMiliseconds(30),
+        owner: 'first',
+        policy: usePartitionOrderingPolicy({
+          ...store,
+          renewPartitions: async () => {
+            throw new Error('renewal failed')
+          },
+        }),
+        publish: async (message) => {
+          await setTimeout(40)
+          published.push(message.id)
+        },
+        onDbError: (error) => {
+          throw error
+        },
+      }).start()
+
+      await waitUntil(() => published.length === 2)
+      await stop()
+      await setTimeout(20)
+
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
   })
 
   test('a second call of stop waits until the outbox is stopped', async () => {
