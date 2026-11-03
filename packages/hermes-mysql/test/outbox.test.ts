@@ -77,6 +77,27 @@ const select = async <T>(pool: Pool, sql: string) => {
   return rows as T[]
 }
 
+const pollingConnections = (pool: Pool) =>
+  select<{ isolation: string }>(
+    pool,
+    `SELECT v.VARIABLE_VALUE AS isolation
+     FROM performance_schema.session_connect_attrs a
+     JOIN performance_schema.threads t ON t.PROCESSLIST_ID = a.PROCESSLIST_ID
+     JOIN performance_schema.variables_by_thread v ON v.THREAD_ID = t.THREAD_ID
+     WHERE a.ATTR_NAME = 'program_name' AND a.ATTR_VALUE = 'hermes-polling'
+       AND v.VARIABLE_NAME = 'transaction_isolation'`,
+  )
+
+const expectNoPollingConnections = async (pool: Pool) => {
+  const deadline = Date.now() + Duration.ofSeconds(10).ms
+
+  while ((await pollingConnections(pool)).length && Date.now() < deadline) {
+    await setTimeout(50)
+  }
+
+  expect(await pollingConnections(pool)).toEqual([])
+}
+
 describe('Migrations', () => {
   test('instances that start at the same time apply every migration once', async () => {
     await mysql.withDatabase(async ({ pool }) => {
@@ -592,16 +613,6 @@ describe('Review fixes', () => {
       const outbox = createConsumer({ ...options, resetOnRelease: true }, ({ messageId }) => {
         published.push(messageId)
       })
-      const pollingConnections = () =>
-        select<{ isolation: string }>(
-          pool,
-          `SELECT v.VARIABLE_VALUE AS isolation
-           FROM performance_schema.session_connect_attrs a
-           JOIN performance_schema.threads t ON t.PROCESSLIST_ID = a.PROCESSLIST_ID
-           JOIN performance_schema.variables_by_thread v ON v.THREAD_ID = t.THREAD_ID
-           WHERE a.ATTR_NAME = 'program_name' AND a.ATTR_VALUE = 'hermes-polling'
-             AND v.VARIABLE_NAME = 'transaction_isolation'`,
-        )
 
       const stop = await outbox.start()
 
@@ -610,7 +621,7 @@ describe('Review fixes', () => {
       }
       await waitUntil(() => published.length === 20)
 
-      const connections = await pollingConnections()
+      const connections = await pollingConnections(pool)
 
       expect(connections.length).toBeGreaterThan(0)
       expect(connections.length).toBeLessThanOrEqual(3)
@@ -622,25 +633,32 @@ describe('Review fixes', () => {
         { isolation: 'REPEATABLE-READ' },
       ])
 
-      const deadline = Date.now() + Duration.ofSeconds(10).ms
-
-      while ((await pollingConnections()).length && Date.now() < deadline) {
-        await setTimeout(50)
-      }
-
-      expect(await pollingConnections()).toEqual([])
+      await expectNoPollingConnections(pool)
     })
   })
 
-  test('a start that fails on invalid options can be tried again and leaves no pool open', async () => {
-    await mysql.withDatabase(async ({ options }) => {
-      const outbox = createConsumer(options, () => {}, { maxPartitions: 0 })
-
-      await expect(outbox.start()).rejects.toThrow(/maxPartitions|partitions/i)
-      await expect(outbox.start()).rejects.not.toThrow(/already started/)
+  test('a failed start closes the polling pool and can be tried again', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      await expect(createConsumer(options, () => {}, { maxPartitions: 0 }).start()).rejects.toThrow(/partitions/i)
       await expect(createConsumer(options, () => {}, { pollingConnectionLimit: 0 }).start()).rejects.toThrow(
         /positive integer/,
       )
+
+      expect(await select(pool, 'SHOW TABLES')).toEqual([])
+
+      const outbox = createConsumer(options, () => {})
+
+      await pool.query('CREATE VIEW `hermes_migrations` AS SELECT 1 AS `other`')
+
+      await expect(outbox.start()).rejects.toThrow(/Unknown column/)
+      await expectNoPollingConnections(pool)
+
+      await pool.query('DROP VIEW `hermes_migrations`')
+
+      const stop = await outbox.start()
+
+      await stop()
+      await expectNoPollingConnections(pool)
     })
   })
 

@@ -9,6 +9,7 @@ const MigrationTable = 'hermes_migrations'
 const MaxRowsPerStatement = 1000
 const DefaultPollingConnectionLimit = 3
 const PollingProgramName = 'hermes-polling'
+const LockWaitTimeoutSeconds = 5
 
 /**
  * Creates the pool that Hermes polls the outbox with.
@@ -22,7 +23,9 @@ const PollingProgramName = 'hermes-polling'
  * Keep it apart from the pool of the application, so the isolation level of the application does not change. Hermes
  * needs only a few connections, so the pool has at most `connectionLimit` of them, and the statements wait in a queue
  * for a free connection (`waitForConnections` and `queueLimit` of `options` are ignored). The statements are short, so
- * a few connections serve many partitions published at the same time.
+ * a few connections serve many partitions published at the same time. A statement waits for a row lock at most
+ * 5 seconds (`innodb_lock_wait_timeout`), so a row locked by the application does not hold a connection, and the
+ * renewals of the claims queued behind it, for longer.
  *
  * @param options - The options of the `mysql2` pool
  * @param connectionLimit - The maximum number of connections of the pool
@@ -46,11 +49,14 @@ const createPollingPool = (options: PoolOptions, connectionLimit = DefaultPollin
   })
 
   pool.on('connection', (connection) => {
-    connection.query('SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED', (error) => {
-      if (error) {
-        connection.destroy()
-      }
-    })
+    connection.query(
+      `SET SESSION transaction_isolation = 'READ-COMMITTED', SESSION innodb_lock_wait_timeout = ${LockWaitTimeoutSeconds}`,
+      (error) => {
+        if (error) {
+          connection.destroy()
+        }
+      },
+    )
   })
 
   return pool.promise()

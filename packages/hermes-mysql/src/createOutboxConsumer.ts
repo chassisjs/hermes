@@ -70,12 +70,8 @@ const createOutboxConsumer = <Message extends JSONValue>(
       isStarted = true
 
       try {
-        if (params.migrate !== false) {
-          await migrate(pollingPool)
-        }
-
         const store = createPollingStore<Message>(() => pollingPool, { consumerName, partitionKey })
-        stopPolling = createPollingOutbox<Message>({
+        const pollingOutbox = createPollingOutbox<Message>({
           policy:
             params.ordering === 'none'
               ? useNoOrderingPolicy(store)
@@ -96,7 +92,13 @@ const createOutboxConsumer = <Message extends JSONValue>(
           retry: params.retry,
           onFailedPublish: params.onFailedPublish,
           onDbError: params.onDbError,
-        }).start()
+        })
+
+        if (params.migrate !== false) {
+          await migrate(pollingPool)
+        }
+
+        stopPolling = pollingOutbox.start()
       } catch (error) {
         isStarted = false
         await pollingPool.end().catch(() => {})
