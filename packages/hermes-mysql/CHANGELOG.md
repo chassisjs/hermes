@@ -12,7 +12,7 @@ See [Conventional Commits](https://conventionalcommits.org) for commit guideline
 - **Event store**, opt-in: `migrate(pool, { eventStore: true })` adds `hermes_streams`, `hermes_events`, `hermes_subscriptions`, `hermes_projections` and `hermes_projection_versions`, on their own track of migrations (`hermes_event_store_migrations`). An application that uses only the outbox gets none of them.
 - `createEventStore(pool, { projections })`: an append locks its stream, checks the expected version, stores the events and updates the inline projections in one transaction: its own, or the one of the application (`tx`), inside a savepoint, so a rejected append leaves nothing and the transaction stays usable.
 - `fromInlineProjection`: a state-stored decider reads its state from the document of a single-stream inline projection.
-- `createEventStoreConsumer` (e.g. a relay to a message broker) and `createProjectionConsumer` (async projections), on the polling outbox: one instance publishes a stream at a time, in order, and the checkpoint and the claim of every stream live in `hermes_subscriptions`. `startFrom: 'end'` starts a new consumer after the existing events. Every projection document keeps the version of every stream that fed it, so replays and redeliveries are idempotent.
+- `createEventStoreConsumer` (e.g. a relay to a message broker) and `createProjectionConsumer` (async projections), on the polling outbox: one instance publishes a stream at a time, in order, and the checkpoint and the claim of every stream live in `hermes_subscriptions`. `startFrom: 'end'` starts a new consumer after the existing events; a single-stream projection started from the end still builds a new document from all the events of its stream. Every projection document keeps the version of every stream that fed it, so replays and redeliveries are idempotent.
 - `createMutex`: a named lock of MySQL (`GET_LOCK`), e.g. for a scheduler that runs on one instance; `lock(signal)` can be aborted.
 - `changedStreamsQuery` is exported.
 
@@ -28,7 +28,10 @@ See [Conventional Commits](https://conventionalcommits.org) for commit guideline
 - A projection added to a running application built documents from the new events only, so a state-stored decider decided on an empty state. A new document now catches up from all the events of its stream, once.
 - A decider whose document was deleted by `evolve` got `null` instead of the initial state.
 - Streams early in the key order could starve the others; the consumers now take turns.
-- Appends or projections creating the same stream or document at once could deadlock.
+- Appends or projections creating the same stream or document at once could deadlock in the transactions of Hermes. In a transaction of the application a deadlock is still possible, and it is thrown, because MySQL rolls the whole transaction back.
+- `readStream` without `tx` could return a `currentVersion` below its last event; it is now the greater of the two.
+- `startFrom: 'end'` loaded all of `hermes_streams` into memory; it now pages through it by the primary key.
+- `createMutex`: concurrent `tryLock` calls could take the reentrant lock of MySQL twice; they are now deduplicated.
 
 # [1.0.0-alpha.20](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.19...v1.0.0-alpha.20) (2026-11-03)
 
