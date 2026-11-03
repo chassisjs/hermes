@@ -71,7 +71,7 @@ const migrations: Migration[] = [
  * deployment pipeline with a user that can change the schema.
  *
  * @param pool - A `mysql2` pool
- * @param options.lockTimeout - How long to wait for other instances that are migrating (default: 1 minute)
+ * @param options.lockTimeout - How long to wait for other instances that are migrating (default: 10 minutes)
  * @returns The versions that this call applied
  */
 const TableLockWaitTimeoutSeconds = 5
@@ -93,7 +93,7 @@ const retryOnTableLockTimeout = async <T>(statement: () => Promise<T>): Promise<
 }
 
 const migrate = async (pool: Pool, options?: { lockTimeout?: Duration }): Promise<number[]> => {
-  const lockTimeout = options?.lockTimeout ?? Duration.ofMinutes(1)
+  const lockTimeout = options?.lockTimeout ?? Duration.ofMinutes(10)
   const connection = await pool.getConnection()
   const lockName = `CONCAT('hermes_migrations.', DATABASE())`
 
@@ -114,16 +114,20 @@ const migrate = async (pool: Pool, options?: { lockTimeout?: Duration }): Promis
     }
 
     try {
-      await connection.query(`
+      await retryOnTableLockTimeout(() =>
+        connection.query(`
         CREATE TABLE IF NOT EXISTS \`${MigrationTable}\` (
           \`version\`     INT           NOT NULL,
           \`name\`        VARCHAR(250)  NOT NULL,
           \`applied_at\`  DATETIME(6)   NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
           PRIMARY KEY (\`version\`)
         ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4
-      `)
+      `),
+      )
 
-      const [rows] = await connection.query<RowDataPacket[]>(`SELECT \`version\` FROM \`${MigrationTable}\``)
+      const [rows] = await retryOnTableLockTimeout(() =>
+        connection.query<RowDataPacket[]>(`SELECT \`version\` FROM \`${MigrationTable}\``),
+      )
       const applied = new Set(rows.map(({ version }) => Number(version)))
       const pending = migrations.filter(({ version }) => !applied.has(version))
 
@@ -132,10 +136,9 @@ const migrate = async (pool: Pool, options?: { lockTimeout?: Duration }): Promis
           await retryOnTableLockTimeout(() => connection.query(statement))
         }
 
-        await connection.query(`INSERT INTO \`${MigrationTable}\` (\`version\`, \`name\`) VALUES (?, ?)`, [
-          version,
-          name,
-        ])
+        await retryOnTableLockTimeout(() =>
+          connection.query(`INSERT INTO \`${MigrationTable}\` (\`version\`, \`name\`) VALUES (?, ?)`, [version, name]),
+        )
       }
 
       return pending.map(({ version }) => version)
