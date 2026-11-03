@@ -103,15 +103,20 @@ describe('Migrations', () => {
     await mysql.withDatabase(async ({ pool }) => {
       const results = await Promise.all([migrate(pool), migrate(pool), migrate(pool)])
 
-      expect(results.flat()).toEqual([1])
+      expect(results.flat().sort()).toEqual([1, 2])
       expect(await migrate(pool)).toEqual([])
-      expect(await select(pool, 'SELECT `version`, `name` FROM `hermes_migrations`')).toEqual([
+      expect(await select(pool, 'SELECT `version`, `name` FROM `hermes_migrations` ORDER BY `version`')).toEqual([
         { version: 1, name: 'create the outbox' },
+        { version: 2, name: 'create the event store' },
       ])
       expect((await select<{ name: string }>(pool, 'SHOW TABLES')).map((row) => Object.values(row)[0]).sort()).toEqual([
+        'hermes_events',
         'hermes_migrations',
         'hermes_outbox',
         'hermes_outbox_partition',
+        'hermes_projections',
+        'hermes_streams',
+        'hermes_subscriptions',
       ])
     })
   })
