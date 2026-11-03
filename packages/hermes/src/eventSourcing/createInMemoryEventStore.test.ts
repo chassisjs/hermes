@@ -223,10 +223,67 @@ describe('createInMemoryEventStore', () => {
       expect((await store.readStream('task-1')).currentVersion).toBe(2n)
     })
 
+    // Unlike Emmett, which treats an empty append as a no-op: an empty append is a bug of the caller.
     test('appending no events is rejected', async () => {
       const store = createInMemoryEventStore()
 
       await expect(store.appendToStream('task-1', [])).rejects.toThrow()
     })
+
+    test.each([
+      { name: 'the current version + 1', expectedVersion: 3n },
+      { name: 'an older version', expectedVersion: 1n },
+      { name: '`no_stream`', expectedVersion: 'no_stream' as const },
+    ])('a rejected append to an existing stream changes nothing ($name)', async ({ expectedVersion }) => {
+      const store = createInMemoryEventStore()
+      await store.appendToStream<SchedulingEvent>('task-1', [note('a'), note('b')])
+      const before = await store.readStream('task-1')
+
+      await expect(
+        store.appendToStream<SchedulingEvent>('task-1', [note('c')], { expectedVersion }),
+      ).rejects.toBeInstanceOf(VersionConflictError)
+
+      expect(await store.readStream('task-1')).toEqual(before)
+    })
+
+    test.each([
+      { name: 'a version above 0', expectedVersion: 1n },
+      { name: '`stream_exists`', expectedVersion: 'stream_exists' as const },
+    ])('a rejected append to a missing stream does not create it ($name)', async ({ expectedVersion }) => {
+      const store = createInMemoryEventStore()
+
+      await expect(
+        store.appendToStream<SchedulingEvent>('task-1', [note('a')], { expectedVersion }),
+      ).rejects.toBeInstanceOf(VersionConflictError)
+
+      expect(await store.readStream('task-1')).toEqual({ events: [], currentVersion: 0n, streamExists: false })
+    })
+
+    test.each([
+      { name: '`any`', expectedVersion: 'any' as const },
+      { name: '`stream_exists`', expectedVersion: 'stream_exists' as const },
+    ])('concurrent appends with $name all succeed, with positions without gaps', async ({ expectedVersion }) => {
+      const store = createInMemoryEventStore()
+      await store.appendToStream<SchedulingEvent>('task-1', [note('first')])
+
+      const results = await Promise.allSettled(
+        Array.from({ length: 10 }, (_, i) =>
+          store.appendToStream<SchedulingEvent>('task-1', [note(`${i}`)], { expectedVersion }),
+        ),
+      )
+
+      expect(results.every(({ status }) => status === 'fulfilled')).toBe(true)
+      expect((await store.readStream('task-1')).events.map(({ streamPosition }) => streamPosition)).toEqual(
+        Array.from({ length: 11 }, (_, i) => BigInt(i + 1)),
+      )
+    })
+  })
+
+  test('other streams do not make a missing stream exist', async () => {
+    const store = createInMemoryEventStore()
+
+    await store.appendToStream<SchedulingEvent>('task-1', [note('a')])
+
+    expect((await store.readStream('task-2')).streamExists).toBe(false)
   })
 })

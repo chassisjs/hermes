@@ -103,7 +103,7 @@ describe('Migrations', () => {
     await mysql.withDatabase(async ({ pool }) => {
       const results = await Promise.all([migrate(pool), migrate(pool), migrate(pool)])
 
-      expect(results.flat().sort()).toEqual([1, 2])
+      expect(results.flat().sort((a, b) => a - b)).toEqual([1, 2])
       expect(await migrate(pool)).toEqual([])
       expect(await select(pool, 'SELECT `version`, `name` FROM `hermes_migrations` ORDER BY `version`')).toEqual([
         { version: 1, name: 'create the outbox' },

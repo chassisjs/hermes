@@ -100,6 +100,33 @@ describe('createCommandHandler', () => {
       await expect(handle('task-1', complete('o-1'))).rejects.toBeInstanceOf(NoOpenOccurrenceError)
       expect((await eventStore.readStream('task-1')).streamExists).toBe(false)
     })
+
+    test('a first command without events does not create the stream', async () => {
+      const eventStore = createInMemoryEventStore()
+      const handle = createCommandHandler({ decider: scheduling, eventStore })
+
+      const result = await handle('task-1', tick(NOW))
+
+      expect(result).toEqual({
+        newEvents: [],
+        newState: scheduling.initialState(),
+        nextVersion: 0n,
+        createdNewStream: false,
+      })
+      expect((await eventStore.readStream('task-1')).streamExists).toBe(false)
+    })
+
+    test('decide can return a single event, not an array', async () => {
+      const eventStore = createInMemoryEventStore()
+      const handle = createCommandHandler({ decider: scheduling, eventStore })
+      await handle('task-1', schedule('o-1', FUTURE))
+
+      const { newEvents, newState, nextVersion } = await handle('task-1', complete('o-1'))
+
+      expect(newEvents).toEqual([completed('o-1')])
+      expect(newState.status).toBe('completed')
+      expect(nextVersion).toBe(2n)
+    })
   })
 
   describe('concurrency', () => {
@@ -135,6 +162,15 @@ describe('createCommandHandler', () => {
       await expect(handle('task-1', tick(NOW))).rejects.toBeInstanceOf(VersionConflictError)
       expect(decide).toHaveBeenCalledTimes(3)
       expect(await typesOf(store, 'task-1')).not.toContain('OccurrenceBecameDueNow')
+    })
+
+    test('does not retry an error other than a version conflict', async () => {
+      const eventStore = createInMemoryEventStore()
+      const decide = jest.fn(scheduling.decide)
+      const handle = createCommandHandler({ decider: { ...scheduling, decide }, eventStore, retry: { attempts: 5 } })
+
+      await expect(handle('task-1', complete('o-1'))).rejects.toBeInstanceOf(NoOpenOccurrenceError)
+      expect(decide).toHaveBeenCalledTimes(1)
     })
 
     test('does not retry without a retry policy', async () => {
@@ -176,18 +212,19 @@ describe('createCommandHandler', () => {
     test('takes the state and the version from `loadState` instead of the events', async () => {
       const eventStore = createInMemoryEventStore()
       const readStream = jest.spyOn(eventStore, 'readStream')
-      const loadState = jest.fn(async () => ({
+      const loadState = jest.fn(async (_params: { streamId: string }) => ({
         state: { status: 'scheduled' as const, occurrenceId: 'o-9', dueAt: PAST },
         version: 0n,
       }))
       const handle = createCommandHandler({ decider: scheduling, eventStore, loadState })
 
-      const { newEvents, nextVersion } = await handle('task-1', tick(NOW))
+      const { newEvents, nextVersion, createdNewStream } = await handle('task-1', tick(NOW))
 
       expect(loadState).toHaveBeenCalledWith(expect.objectContaining({ streamId: 'task-1' }))
       expect(readStream).not.toHaveBeenCalled()
       expect(newEvents).toEqual([{ type: 'OccurrenceBecameDueNow', data: { occurrenceId: 'o-9', dueAt: PAST } }])
       expect(nextVersion).toBe(1n)
+      expect(createdNewStream).toBe(true)
     })
 
     test('appends with the version from `loadState`, so a stale state is a conflict', async () => {

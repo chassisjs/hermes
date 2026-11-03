@@ -297,7 +297,102 @@ describe('Optimistic concurrency', () => {
       )
 
       expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+      // a conflict, not ER_DUP_ENTRY from the INSERT into hermes_streams
+      results
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .forEach(({ reason }) => expect(reason).toBeInstanceOf(VersionConflictError))
       expect((await eventStore.readStream('task-1')).currentVersion).toBe(1n)
+    })
+  })
+
+  test.each([
+    { name: 'the current version + 1', exists: true, expectedVersion: 3n },
+    { name: 'an older version', exists: true, expectedVersion: 1n },
+    { name: '`no_stream`', exists: true, expectedVersion: 'no_stream' as const },
+    { name: 'a version above 0', exists: false, expectedVersion: 1n },
+    { name: '`stream_exists`', exists: false, expectedVersion: 'stream_exists' as const },
+  ])('a rejected append changes nothing: $name', async ({ exists, expectedVersion }) => {
+    await mysql.withDatabase(async ({ pool }) => {
+      const eventStore = await setUp(pool)
+
+      if (exists) {
+        await eventStore.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', FUTURE), note('b')])
+      }
+
+      const before = await eventStore.readStream('task-1')
+      const projection = await eventStore.readProjection(occurrences, 'task-1')
+
+      await expect(
+        eventStore.appendToStream<SchedulingEvent>('task-1', [completed('o-1')], { expectedVersion }),
+      ).rejects.toBeInstanceOf(VersionConflictError)
+
+      expect(await eventStore.readStream('task-1')).toEqual(before)
+      expect(await eventStore.readProjection(occurrences, 'task-1')).toEqual(projection)
+    })
+  })
+
+  test.each([
+    { name: '`any`', expectedVersion: 'any' as const },
+    { name: 'the default', expectedVersion: undefined },
+    { name: '`stream_exists`', expectedVersion: 'stream_exists' as const },
+  ])('concurrent appends with $name all succeed, with positions without gaps', async ({ expectedVersion }) => {
+    await mysql.withDatabase(async ({ pool }) => {
+      const eventStore = await setUp(pool)
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('first')])
+
+      const results = await Promise.allSettled(
+        Array.from({ length: 20 }, (_, i) =>
+          eventStore.appendToStream<SchedulingEvent>('task-1', [note(`${i}`), note(`${i}'`)], { expectedVersion }),
+        ),
+      )
+
+      expect(results.filter(({ status }) => status === 'rejected')).toEqual([])
+
+      const { events, currentVersion } = await eventStore.readStream<SchedulingEvent>('task-1')
+
+      expect(currentVersion).toBe(41n)
+      expect(events.map(({ streamPosition }) => streamPosition)).toEqual(
+        Array.from({ length: 41 }, (_, i) => BigInt(i + 1)),
+      )
+      // the two events of one append stay next to each other
+      for (let i = 1; i < events.length; i += 2) {
+        expect(`${(events[i].data as { text: string }).text}'`).toBe((events[i + 1].data as { text: string }).text)
+      }
+    })
+  })
+
+  test('other streams do not make a missing stream exist', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      const eventStore = await setUp(pool)
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a')])
+
+      expect((await eventStore.readStream('task-2')).streamExists).toBe(false)
+    })
+  })
+
+  test('appends to many streams in one transaction of the application commit or roll back together', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      const eventStore = await setUp(pool)
+      await eventStore.appendToStream<SchedulingEvent>('task-2', [note('a')])
+
+      await expect(
+        withTransaction(pool, async (tx) => {
+          await eventStore.appendToStream<SchedulingEvent>('task-1', [note('b')], { tx })
+          await eventStore.appendToStream<SchedulingEvent>('task-2', [note('c')], { tx, expectedVersion: 0n })
+        }),
+      ).rejects.toBeInstanceOf(VersionConflictError)
+
+      expect((await eventStore.readStream('task-1')).streamExists).toBe(false)
+      expect((await eventStore.readStream('task-2')).currentVersion).toBe(1n)
+
+      await withTransaction(pool, async (tx) => {
+        await eventStore.appendToStream<SchedulingEvent>('task-1', [note('b')], { tx })
+        await eventStore.appendToStream<SchedulingEvent>('task-2', [note('c')], { tx, expectedVersion: 1n })
+      })
+
+      expect((await eventStore.readStream('task-1')).currentVersion).toBe(1n)
+      expect((await eventStore.readStream('task-2')).currentVersion).toBe(2n)
     })
   })
 
@@ -380,6 +475,43 @@ describe('Inline projections', () => {
       expect(() => fromInlineProjection(eventStore, multiStream)).toThrow()
     })
   })
+
+  test('an inline projection that throws rolls back the events and the document', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool)
+      const strict = defineHermesProjection<{ texts: string[] }, SchedulingEvent>()
+        .ofName('strict')
+        .ofDocumentType()
+        .ofEvents('NoteAdded')
+        .ofInitialState(() => ({ texts: [] }))
+        .ofEvolve((state, event) => {
+          if (event.data.text === 'boom') {
+            throw new Error('evolve failed')
+          }
+
+          return { texts: [...state.texts, event.data.text] }
+        })
+        .inline()
+        .done()
+      const eventStore = createEventStore(pool, { projections: [strict] })
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a')])
+      await expect(eventStore.appendToStream<SchedulingEvent>('task-1', [note('b'), note('boom')])).rejects.toThrow(
+        'evolve failed',
+      )
+
+      expect((await eventStore.readStream('task-1')).currentVersion).toBe(1n)
+      expect(await eventStore.readProjection(strict, 'task-1')).toEqual({ data: { texts: ['a'] }, version: 1n })
+    })
+  })
+
+  test('the names of the projections are unique', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool)
+
+      expect(() => createEventStore(pool, { projections: [occurrences, occurrences] })).toThrow()
+    })
+  })
 })
 
 describe('Command handler, state-stored', () => {
@@ -416,22 +548,29 @@ describe('Command handler, state-stored', () => {
         retry: { attempts: 10 },
       })
 
-      await handle('task-1', schedule('o-1', PAST, PAST))
+      // Due at NOW, scheduled before it: the occurrence stays scheduled until the tick.
+      await handle('task-1', schedule('o-1', NOW, PAST))
+      expect(await eventStore.readProjection(occurrences, 'task-1')).toMatchObject({ data: { status: 'scheduled' } })
 
-      const results = await Promise.allSettled([
+      const [tickResult, ...completions] = await Promise.allSettled([
         handle('task-1', tick(NOW)),
         ...Array.from({ length: 5 }, () => handle('task-1', complete('o-1'))),
       ])
-      const completions = results.slice(1)
 
       expect(completions.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
       completions
         .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
         .forEach(({ reason }) => expect(reason).toBeInstanceOf(NoOpenOccurrenceError))
+      // the tick either got there first, or saw the completion and emitted nothing
+      expect(tickResult.status).toBe('fulfilled')
 
       const types = (await eventStore.readStream<SchedulingEvent>('task-1')).events.map(({ type }) => type)
 
       expect(types.filter((type) => type === 'TaskCompleted')).toHaveLength(1)
+      expect(types.filter((type) => type === 'OccurrenceBecameDueNow').length).toBeLessThanOrEqual(1)
+      if (types.includes('OccurrenceBecameDueNow')) {
+        expect(types.indexOf('OccurrenceBecameDueNow')).toBeLessThan(types.indexOf('TaskCompleted'))
+      }
       expect(await eventStore.readProjection(occurrences, 'task-1')).toMatchObject({ data: { status: 'completed' } })
     })
   })
@@ -638,7 +777,6 @@ describe('Event store consumer', () => {
       const blocked = new Promise<void>((resolve) => (unblock = resolve))
       let publishing = false
 
-      onDispose(async () => unblock())
       onDispose(
         await createEventStoreConsumer<SchedulingEvent>({
           getOptions: () => options,
@@ -650,6 +788,8 @@ describe('Event store consumer', () => {
           pollInterval: Duration.ofMiliseconds(50),
         }).start(),
       )
+      // disposed first (in reverse order), so stop() does not wait for the blocked publish when the test fails
+      onDispose(async () => unblock())
 
       await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a')])
       await waitUntil(() => publishing)
@@ -662,6 +802,123 @@ describe('Event store consumer', () => {
       ).resolves.toEqual({ nextVersion: 2n, createdNewStream: false })
 
       unblock()
+    })
+  })
+
+  test('the streams of a dead instance are taken over when its lease expires', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const published: HermesEventEnvelope<SchedulingEvent>[] = []
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a'), note('b')])
+      // A claim of an instance that died: nobody renews it.
+      await pool.query(
+        'INSERT INTO `hermes_subscriptions` (`consumer_name`, `stream_id`, `version`, `owner`, `lease_until`) ' +
+          'VALUES (?, ?, 0, ?, NOW(6) + INTERVAL 1 SECOND)',
+        ['relay', 'task-1', 'dead-instance'],
+      )
+
+      onDispose(
+        await createEventStoreConsumer<SchedulingEvent>({
+          getOptions: () => options,
+          consumerName: 'relay',
+          publish: (event) => void published.push(event),
+          pollInterval: Duration.ofMiliseconds(50),
+        }).start(),
+      )
+
+      await setTimeout(500)
+      expect(published).toEqual([])
+
+      await waitUntil(() => published.length === 2)
+      expect(positionsBy(published, 'task-1')).toEqual([1n, 2n])
+    })
+  })
+
+  test('a new consumer can start from the end of the streams', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const published: HermesEventEnvelope<SchedulingEvent>[] = []
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('old'), note('old')])
+
+      onDispose(
+        await createEventStoreConsumer<SchedulingEvent>({
+          getOptions: () => options,
+          consumerName: 'late',
+          publish: (event) => void published.push(event),
+          pollInterval: Duration.ofMiliseconds(50),
+          startFrom: 'end',
+        }).start(),
+      )
+
+      await setTimeout(300)
+      expect(published).toEqual([])
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('new')])
+      await eventStore.appendToStream<SchedulingEvent>('task-2', [note('new')])
+
+      await waitUntil(() => published.length === 2)
+      expect(published.map(({ streamId, streamPosition }) => [streamId, streamPosition])).toEqual(
+        expect.arrayContaining([
+          ['task-1', 3n],
+          ['task-2', 1n],
+        ]),
+      )
+    })
+  })
+
+  test('by default a new consumer starts from the beginning of the streams', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const published: HermesEventEnvelope<SchedulingEvent>[] = []
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a'), note('b')])
+
+      onDispose(
+        await createEventStoreConsumer<SchedulingEvent>({
+          getOptions: () => options,
+          consumerName: 'new',
+          publish: (event) => void published.push(event),
+          pollInterval: Duration.ofMiliseconds(50),
+        }).start(),
+      )
+
+      await waitUntil(() => published.length === 2)
+    })
+  })
+
+  // A smoke test of the cost of finding the streams with new events, not a benchmark.
+  test('finds a new event fast among many streams that have nothing new', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const streams = 5_000
+      let published = 0
+
+      for (let i = 0; i < streams; i += 100) {
+        await Promise.all(
+          Array.from({ length: 100 }, (_, j) =>
+            eventStore.appendToStream<SchedulingEvent>(`task-${i + j}`, [note('a')]),
+          ),
+        )
+      }
+
+      onDispose(
+        await createEventStoreConsumer<SchedulingEvent>({
+          getOptions: () => options,
+          consumerName: 'relay',
+          publish: () => void published++,
+          pollInterval: Duration.ofMiliseconds(50),
+          maxPartitions: 50,
+        }).start(),
+      )
+      await waitUntil(() => published === streams, Duration.ofMinutes(2))
+
+      const appendedAt = Date.now()
+      await eventStore.appendToStream<SchedulingEvent>('task-42', [note('b')])
+      await waitUntil(() => published === streams + 1)
+
+      expect(Date.now() - appendedAt).toBeLessThan(Duration.ofSeconds(1).ms)
     })
   })
 })
@@ -733,16 +990,30 @@ describe('Async projections', () => {
         .async()
         .done()
 
+      const onFailedPublish = jest.fn()
+
       onDispose(
         await createProjectionConsumer({
           getOptions: () => options,
           projection: flaky,
           pollInterval: Duration.ofMiliseconds(50),
-          retry: () => Duration.ofMiliseconds(100),
+          retry: () => Duration.ofSeconds(2),
+          onFailedPublish,
         }).start(),
       )
 
       await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a'), note('b'), note('c')])
+
+      // before the retry: 'a' is applied, 'b' is not, and the version stops at 'a'
+      await waitUntil(() => onFailedPublish.mock.calls.length === 1)
+      expect(await eventStore.readProjection(flaky, 'task-1')).toEqual({ data: { texts: ['a'] }, version: 1n })
+      expect(
+        await count(
+          pool,
+          'SELECT `version` AS n FROM `hermes_subscriptions` WHERE `consumer_name` = ? AND `stream_id` = ?',
+          ['projection:flaky', 'task-1'],
+        ),
+      ).toBe(1)
 
       await waitUntil(async () => (await eventStore.readProjection(flaky, 'task-1'))?.data.texts.length === 3)
       expect(await eventStore.readProjection(flaky, 'task-1')).toEqual({
@@ -785,6 +1056,35 @@ describe('Async projections', () => {
             ['projection:scheduledOnly', 'task-1'],
           )) === 3,
       )
+    })
+  })
+
+  test('a document fed by many streams loses no update with many instances and lanes', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+
+      for (let i = 0; i < 2; i++) {
+        onDispose(
+          await createProjectionConsumer({
+            getOptions: () => options,
+            projection: eventCounter,
+            pollInterval: Duration.ofMiliseconds(20),
+            maxPartitions: 10,
+          }).start(),
+        )
+      }
+
+      await Promise.all(
+        Array.from({ length: 20 }, async (_, stream) => {
+          for (let i = 0; i < 10; i++) {
+            await eventStore.appendToStream<SchedulingEvent>(`task-${stream}`, [note(`${i}`)])
+          }
+        }),
+      )
+
+      await waitUntil(async () => (await eventStore.readProjection(eventCounter, 'all'))?.data.count === 200)
+      await setTimeout(300)
+      expect((await eventStore.readProjection(eventCounter, 'all'))?.data.count).toBe(200)
     })
   })
 })
@@ -859,6 +1159,51 @@ describe('Mutex', () => {
 
       expect(await tick.tryLock()).toBe(true)
       expect(await report.tryLock()).toBe(true)
+    })
+  })
+
+  // GET_LOCK is reentrant since MySQL 5.7: a second GET_LOCK needs a second RELEASE_LOCK.
+  test('locking twice and unlocking once frees the lock', async () => {
+    await mysql.withDatabase(async ({ options, onDispose }) => {
+      const first = createMutex({ getOptions: () => options, name: 'scheduling-tick' })
+      const second = createMutex({ getOptions: () => options, name: 'scheduling-tick' })
+      onDispose(() => first.unlock())
+      onDispose(() => second.unlock())
+
+      expect(await first.tryLock()).toBe(true)
+      expect(await first.tryLock()).toBe(true)
+      await first.lock()
+      await first.unlock()
+
+      expect(await second.tryLock()).toBe(true)
+    })
+  })
+
+  test('unlocking a lock that is not held does nothing', async () => {
+    await mysql.withDatabase(async ({ options, onDispose }) => {
+      const holder = createMutex({ getOptions: () => options, name: 'scheduling-tick' })
+      const other = createMutex({ getOptions: () => options, name: 'scheduling-tick' })
+      onDispose(() => holder.unlock())
+
+      await expect(other.unlock()).resolves.toBeUndefined()
+      expect(await holder.tryLock()).toBe(true)
+      await expect(other.unlock()).resolves.toBeUndefined()
+      expect(await holder.stillHeld()).toBe(true)
+    })
+  })
+
+  test('names longer than the 64 characters of MySQL work and stay distinct', async () => {
+    await mysql.withDatabase(async ({ options, onDispose }) => {
+      const prefix = 'hermes-relay:'.padEnd(80, 'x')
+      const a = createMutex({ getOptions: () => options, name: `${prefix}-a` })
+      const b = createMutex({ getOptions: () => options, name: `${prefix}-b` })
+      const a2 = createMutex({ getOptions: () => options, name: `${prefix}-a` })
+      onDispose(() => a.unlock())
+      onDispose(() => b.unlock())
+
+      expect(await a.tryLock()).toBe(true)
+      expect(await b.tryLock()).toBe(true)
+      expect(await a2.tryLock()).toBe(false)
     })
   })
 })

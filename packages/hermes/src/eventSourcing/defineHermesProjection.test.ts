@@ -217,11 +217,11 @@ describe('defineHermesProjection', () => {
       })
     })
 
-    test('does not change the current state', () => {
-      const current = Object.freeze(applyProjection(priorityPatients, null, [added(5)]))
+    test('returns the current state as it is when no event is handled', () => {
+      const current = applyProjection(priorityPatients, null, [added(5)])
 
-      expect(() => applyProjection(priorityPatients, current, [alert(5)])).not.toThrow()
-      expect(current.priority).toBe(false)
+      expect(applyProjection(priorityPatients, current, [removed(5)])).toBe(current)
+      expect(applyProjection(priorityPatients, current, [])).toBe(current)
     })
   })
 })
