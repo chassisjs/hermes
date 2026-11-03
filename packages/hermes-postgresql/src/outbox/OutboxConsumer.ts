@@ -384,10 +384,21 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
       this._state = new OutboxConsumerState(new OutboxConsumerStore(sql, consumerName, partitionKey))
     }
 
+    let asyncOutboxStop: Stop | undefined
+
     try {
       await migrate(sql, slotName)
 
       await this._state.createOrLoad(partitionKey)
+
+      if (this._params.asyncOutbox) {
+        const asyncOutbox = this._params.asyncOutbox(this)
+        asyncOutboxStop = asyncOutbox.start()
+
+        this._sendAsync = async (message, options) => {
+          await asyncOutbox.send(message, options)
+        }
+      }
 
       const replicationState: LogicalReplicationState = {
         lastProcessedLsn: this._state.lastProcessedLsn,
@@ -438,22 +449,12 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
     } catch (error) {
       const timeout = Duration.ofSeconds(1).ms
 
+      await swallow(() => (asyncOutboxStop ? asyncOutboxStop() : Promise.resolve()))
       await Promise.all([swallow(() => sql.end({ timeout })), swallow(() => subscribeSql.end({ timeout }))])
       this._sql = null
       this._state = undefined
 
       throw error
-    }
-
-    let asyncOutboxStop: Stop | undefined
-
-    if (this._params.asyncOutbox) {
-      const asyncOutbox = this._params.asyncOutbox(this)
-      asyncOutboxStop = asyncOutbox.start()
-
-      this._sendAsync = async (message, options) => {
-        await asyncOutbox.send(message, options)
-      }
     }
 
     return async () => {

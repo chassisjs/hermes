@@ -16,6 +16,12 @@ import { postgres } from './postgresql.js'
 
 jest.setTimeout(Duration.ofMinutes(5).ms)
 
+const migrateWithIndex = async (sql: Sql) => {
+  const { pendingIndex } = await migrate(sql, 'hermes_slot_app_default')
+
+  await pendingIndex
+}
+
 const getOptions = (container: StartedPostgreSqlContainer) => ({
   host: container.getHost(),
   port: container.getPort(),
@@ -57,7 +63,7 @@ describe('Async outbox', () => {
     await postgres(async (sql) => {
       const published: string[] = []
 
-      await migrate(sql, 'hermes_slot_app_default')
+      await migrateWithIndex(sql)
 
       const outbox = createAsyncOutbox(sql, (messageId) => {
         published.push(messageId)
@@ -98,7 +104,7 @@ describe('Async outbox', () => {
       const published: string[] = []
       let failures = 2
 
-      await migrate(sql, 'hermes_slot_app_default')
+      await migrateWithIndex(sql)
 
       const outbox = createAsyncOutboxConsumer<MedicineEvent>({
         getSql: () => sql as never,
@@ -138,7 +144,7 @@ describe('Async outbox', () => {
       const inProgress = new Set<string>()
       let overlaps = 0
 
-      await migrate(sql, 'hermes_slot_app_default')
+      await migrateWithIndex(sql)
 
       const publish = async (messageId: string, partitionKey: string) => {
         if (inProgress.has(partitionKey)) {
@@ -180,7 +186,7 @@ describe('Async outbox', () => {
     await postgres(async (sql) => {
       const published: string[] = []
 
-      await migrate(sql, 'hermes_slot_app_default')
+      await migrateWithIndex(sql)
 
       const createInstance = (name: string) =>
         createAsyncOutboxConsumer<MedicineEvent>({
@@ -282,7 +288,7 @@ describe('Async outbox', () => {
         VALUES ('app', 'old', 'Test', '{}'::jsonb)
       `
 
-      await migrate(sql, 'hermes_slot_app_default')
+      await migrateWithIndex(sql)
 
       const tenantPublished: string[] = []
       const createConsumer = (partitionKey: string, published: string[]) =>
@@ -327,11 +333,7 @@ describe('Async outbox', () => {
 
   test('instances that start at the same time on an empty database all migrate it', async () => {
     await postgres(async (sql) => {
-      await Promise.all([
-        migrate(sql, 'hermes_slot_app_default'),
-        migrate(sql, 'hermes_slot_app_default'),
-        migrate(sql, 'hermes_slot_app_default'),
-      ])
+      await Promise.all([migrateWithIndex(sql), migrateWithIndex(sql), migrateWithIndex(sql)])
 
       expect(
         await sql`
@@ -350,7 +352,7 @@ describe('Async outbox', () => {
         VALUES ('app', ${messageId}, 'Test', '{}'::jsonb)
       `
 
-      await migrate(sql, 'hermes_slot_app_default')
+      await migrateWithIndex(sql)
       await sql`ALTER TABLE "asyncOutbox" ALTER COLUMN "partitionKey" DROP NOT NULL`
 
       const tx = await sql.reserve()
@@ -358,7 +360,7 @@ describe('Async outbox', () => {
       await tx`BEGIN`
       await insert('long-transaction', tx)
 
-      const migrating = migrate(sql, 'hermes_slot_app_default')
+      const migrating = migrateWithIndex(sql)
 
       await setTimeout(1500)
 
@@ -381,9 +383,42 @@ describe('Async outbox', () => {
     })
   })
 
+  test('builds the index of the polling outbox in the background, so the start does not wait for old snapshots', async () => {
+    await postgres(async (sql) => {
+      await migrateWithIndex(sql)
+      await sql`DROP INDEX "asyncOutboxPendingIdx"`
+
+      const tx = await sql.reserve()
+
+      try {
+        await tx`BEGIN ISOLATION LEVEL REPEATABLE READ`
+        await tx`SELECT 1 FROM "asyncOutbox"`
+
+        const startedAt = Date.now()
+        const { pendingIndex } = await migrate(sql, 'hermes_slot_app_default')
+
+        expect(Date.now() - startedAt).toBeLessThan(Duration.ofSeconds(5).ms)
+
+        await setTimeout(500)
+        await tx`COMMIT`
+        await pendingIndex
+      } finally {
+        tx.release()
+      }
+
+      expect(
+        await sql`
+          SELECT i.indisvalid AS "isValid" FROM pg_index i
+          JOIN pg_class c ON c.oid = i.indexrelid
+          WHERE c.relname = 'asyncOutboxPendingIdx'
+        `,
+      ).toEqual([{ isValid: true }])
+    })
+  })
+
   test('repairs the async outbox migrated by earlier builds and migrates again without waiting for open transactions', async () => {
     await postgres(async (sql) => {
-      await migrate(sql, 'hermes_slot_app_default')
+      await migrateWithIndex(sql)
       await sql`ALTER TABLE "asyncOutbox" ALTER COLUMN "partitionKey" DROP NOT NULL`
       await sql`ALTER TABLE "asyncOutbox" ALTER COLUMN "partitionKey" DROP DEFAULT`
       await sql`ALTER TABLE "asyncOutbox" ALTER COLUMN "partitionKey" TYPE VARCHAR(30)`
@@ -393,11 +428,7 @@ describe('Async outbox', () => {
         VALUES ('app', 'old', 'Test', '{}'::jsonb)
       `
 
-      await Promise.all([
-        migrate(sql, 'hermes_slot_app_default'),
-        migrate(sql, 'hermes_slot_app_default'),
-        migrate(sql, 'hermes_slot_app_default'),
-      ])
+      await Promise.all([migrateWithIndex(sql), migrateWithIndex(sql), migrateWithIndex(sql)])
 
       expect(await sql`SELECT "partitionKey" FROM "asyncOutbox"`).toEqual([{ partitionKey: 'default' }])
       expect(
@@ -431,10 +462,7 @@ describe('Async outbox', () => {
           VALUES ('app', 'uncommitted', 'Test', '{}'::jsonb)
         `
         await expect(
-          Promise.race([
-            migrate(sql, 'hermes_slot_app_default').then(() => 'migrated'),
-            setTimeout(Duration.ofSeconds(5).ms, 'blocked'),
-          ]),
+          Promise.race([migrateWithIndex(sql).then(() => 'migrated'), setTimeout(Duration.ofSeconds(5).ms, 'blocked')]),
         ).resolves.toBe('migrated')
       } finally {
         await tx`ROLLBACK`
@@ -470,7 +498,7 @@ describe('Async outbox', () => {
 
   test('a failure reported after the claim expired keeps the claim of another instance', async () => {
     await postgres(async (sql) => {
-      await migrate(sql, 'hermes_slot_app_default')
+      await migrateWithIndex(sql)
 
       const store = createPollingStore<MedicineEvent>(() => sql as never, { consumerName: 'app' })
 
@@ -505,7 +533,7 @@ describe('Async outbox', () => {
 
   test('finds the partitions with undelivered messages and removes the empty ones', async () => {
     await postgres(async (sql) => {
-      await migrate(sql, 'hermes_slot_app_default')
+      await migrateWithIndex(sql)
 
       const store = createPollingStore<MedicineEvent>(() => sql as never, { consumerName: 'app' })
       const outbox = createAsyncOutbox(sql, () => {})
@@ -539,7 +567,7 @@ describe('Async outbox', () => {
 
   test('with partition ordering, a failure reported by an instance that lost the partition is ignored', async () => {
     await postgres(async (sql) => {
-      await migrate(sql, 'hermes_slot_app_default')
+      await migrateWithIndex(sql)
 
       const store = createPollingStore<MedicineEvent>(() => sql as never, { consumerName: 'app' })
 

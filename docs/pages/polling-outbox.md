@@ -84,13 +84,13 @@ Hermes adds the columns `partitionKey`, `nextAttemptAt`, `claimedBy` and `claime
 ::: warning Rolling deployment
 Instances of an earlier version do not know the partitions and the claims. They publish all the undelivered messages of their `consumerName`, of every partition, also the ones that the new instances are publishing at the same time. Until the last old instance stops, a message can go through the `publish` of a consumer of another partition (another tenant), be published twice, or out of order. When that matters, stop all the old instances before you start the new ones.
 
-The migration of the new version can also wait for the old instances, or fail on a deadlock with them: it builds an index `CONCURRENTLY`, which waits for their transactions, while they may wait for it when they create their replication slots. Stopping the old instances first avoids it too.
+The background build of the new index can also wait for the old instances, or fail on a deadlock with them: `CREATE INDEX CONCURRENTLY` waits for their transactions, while they may wait for it when they create their replication slots. The new instances start anyway and build the index at the next start; stopping the old instances first avoids it.
 :::
 
 ::: tip Migrations and connection poolers
 Instances that start at the same time migrate one after another, under an advisory lock of the session. Connect Hermes to PostgreSQL directly or through a session pooler: a transaction pooler (e.g. PgBouncer in the transaction mode, RDS Proxy) can run the lock and the unlock in different sessions, so the lock stays taken. The logical replication of Hermes needs a direct connection anyway. Hermes warns (`process.emitWarning`, code `HERMES_MIGRATION_LOCK`) when it waits for the lock longer than 30 seconds or cannot release it.
 
-The index of the polling outbox is built `CONCURRENTLY`, so it does not stop your inserts, but it waits for all older transactions. When it is not built in 30 seconds, e.g. behind a long backup, Hermes starts without it (code `HERMES_INDEX_NOT_BUILT`) and builds it at the next start.
+The index of the polling outbox is built `CONCURRENTLY`, so it does not stop your inserts, in the background after the migration, so the start does not wait for it. The build waits for all older transactions, e.g. a long backup; the outbox works without the index meanwhile, only its polls are slower. When the build fails, Hermes warns (code `HERMES_INDEX_NOT_BUILT`, with the statement to build it yourself) and the next start tries again.
 :::
 
 ## Your own store
