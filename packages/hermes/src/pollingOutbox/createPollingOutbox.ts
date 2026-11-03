@@ -81,9 +81,15 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
   }
 
   const publishLanes = async (lanes: PollingLane<Message>[], stopping: AbortSignal) => {
+    let renewing: Promise<void> | undefined
     const renewal = setInterval(
       () => {
-        policy.renew({ owner, lease, lanes }).catch(onDbError)
+        renewing ??= policy
+          .renew({ owner, lease, lanes })
+          .catch(onDbError)
+          .finally(() => {
+            renewing = undefined
+          })
       },
       Math.max(Math.floor(lease.ms / 3), 1),
     )

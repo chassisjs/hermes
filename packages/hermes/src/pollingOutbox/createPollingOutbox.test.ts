@@ -287,6 +287,38 @@ describe('createPollingOutbox with usePartitionOrderingPolicy', () => {
     expect(publishers).toEqual(['first', 'first'])
   })
 
+  test('does not start a renewal while the previous one is still running', async () => {
+    const { store, add } = createInMemoryStore()
+    let renewals = 0
+    let running = 0
+    let overlapped = false
+
+    add(1)
+
+    const stop = createPollingOutbox({
+      ...fast,
+      lease: Duration.ofMiliseconds(30),
+      owner: 'first',
+      policy: usePartitionOrderingPolicy({
+        ...store,
+        renewPartitions: async (params) => {
+          renewals++
+          running++
+          overlapped ||= running > 1
+          await setTimeout(50)
+          await store.renewPartitions(params)
+          running--
+        },
+      }),
+      publish: () => setTimeout(200),
+    }).start()
+
+    await waitUntil(() => renewals >= 2)
+    await stop()
+
+    expect(overlapped).toBe(false)
+  })
+
   test('stop waits for the message being published and releases the partitions', async () => {
     const { store, add, rows, partitions } = createInMemoryStore()
     let release = () => {}
