@@ -453,6 +453,7 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
       await Promise.all([swallow(() => sql.end({ timeout })), swallow(() => subscribeSql.end({ timeout }))])
       this._sql = null
       this._state = undefined
+      this._sendAsync = null
 
       throw error
     }

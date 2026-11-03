@@ -219,11 +219,13 @@ const createPollingStore = <Message>(
     async renewPartitions({ owner, lease, partitionKeys }) {
       const sql = getSql()
 
-      await sql`
+      const { count } = await sql`
         UPDATE "asyncOutboxPartition"
         SET "claimedUntil" = ${after(lease)}
         WHERE "consumerName" = ${consumerName} AND "partitionKey" IN ${sql(partitionKeys)} AND "claimedBy" = ${owner}
       `
+
+      return count
     },
 
     async releasePartitions({ owner }) {

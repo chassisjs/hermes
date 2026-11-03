@@ -84,13 +84,20 @@ Hermes adds the columns `partitionKey`, `nextAttemptAt`, `claimedBy` and `claime
 ::: warning Rolling deployment
 Instances of an earlier version do not know the partitions and the claims. They publish all the undelivered messages of their `consumerName`, of every partition, also the ones that the new instances are publishing at the same time. Until the last old instance stops, a message can go through the `publish` of a consumer of another partition (another tenant), be published twice, or out of order. When that matters, stop all the old instances before you start the new ones.
 
-The background build of the new index can also wait for the old instances, or fail on a deadlock with them: `CREATE INDEX CONCURRENTLY` waits for their transactions, while they may wait for it when they create their replication slots. The new instances start anyway and build the index at the next start; stopping the old instances first avoids it.
+Build the index of the polling outbox (see below) when the old instances are stopped: `CREATE INDEX CONCURRENTLY` waits for their transactions, while they may wait for it when they create their replication slots.
 :::
 
 ::: tip Migrations and connection poolers
 Instances that start at the same time migrate one after another, under an advisory lock of the session. Connect Hermes to PostgreSQL directly or through a session pooler: a transaction pooler (e.g. PgBouncer in the transaction mode, RDS Proxy) can run the lock and the unlock in different sessions, so the lock stays taken. The logical replication of Hermes needs a direct connection anyway. Hermes warns (`process.emitWarning`, code `HERMES_MIGRATION_LOCK`) when it waits for the lock longer than 30 seconds or cannot release it.
 
-The index of the polling outbox is built `CONCURRENTLY`, so it does not stop your inserts, in the background after the migration, so the start does not wait for it. The build waits for all older transactions, e.g. a long backup; the outbox works without the index meanwhile, only its polls are slower. When the build fails, Hermes warns (code `HERMES_INDEX_NOT_BUILT`, with the statement to build it yourself) and the next start tries again.
+Hermes creates the index of the polling outbox (`asyncOutboxPendingIdx`) only when the `asyncOutbox` table is empty. With an existing table, a plain `CREATE INDEX` would stop your inserts while it reads the table, and `CREATE INDEX CONCURRENTLY` waits for all older transactions, so it does not belong in the start of your application. Hermes warns about the missing index (code `HERMES_INDEX_MISSING`); the outbox works without it, but its polls read the whole table. Build it yourself after the upgrade:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "asyncOutboxPendingIdx"
+ON "asyncOutbox" ("consumerName", "partitionKey", "position") WHERE "delivered" = false;
+```
+
+When the build fails, it leaves an invalid index: drop it (`DROP INDEX CONCURRENTLY "asyncOutboxPendingIdx"`) and build it again.
 :::
 
 ## Your own store

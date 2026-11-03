@@ -1,4 +1,4 @@
-import { Duration, swallow } from '@chassisjs/hermes'
+import { Duration } from '@chassisjs/hermes'
 import { setTimeout } from 'node:timers/promises'
 import { type ReservedSql, Sql } from 'postgres'
 import { PublicationName, type SlotName } from '../common/consts.js'
@@ -19,7 +19,6 @@ export const dropReplicationSlot = async (sql: Sql, slotName: SlotName) => {
 const MigrationLock = { classId: 0x48524d53, objectId: 1 }
 const LockTimeoutAttempts = 20
 const LockNotAvailable = '55P03'
-const IndexBuildLockObjectId = 2
 const MigrationLockWarningAfter = Duration.ofSeconds(30)
 
 /**
@@ -51,10 +50,7 @@ const migrateWithLockTimeout = async (migration: () => Promise<unknown>) => {
  * connection for the whole migration). The others try to take the lock again and again instead of waiting in a
  * statement, because `CREATE INDEX CONCURRENTLY` waits for the transactions that started before it, so it would wait
  * for them while they wait for it. The upgrades check the schema first, so they take no lock of a table that is up
- * to date.
- *
- * @returns `pendingIndex`, which resolves when the background build of the index of the polling outbox ends
- * ({@link buildPendingIndex}). It never rejects.
+ * to date. The index of the polling outbox is created only with an empty table ({@link warnAboutPendingIndex}).
  */
 export const migrate = async (sql: Sql, slotName: string) => {
   const connection = await sql.reserve()
@@ -75,8 +71,6 @@ export const migrate = async (sql: Sql, slotName: string) => {
   } finally {
     connection.release()
   }
-
-  return { pendingIndex: buildPendingIndex(sql) }
 }
 
 const lockMigration = async (connection: ReservedSql) => {
@@ -139,55 +133,26 @@ const findPendingIndex = async (sql: Sql | ReservedSql) => {
 }
 
 /**
- * Builds the index of the polling outbox `CONCURRENTLY`, so it does not stop the inserts of the application, after
- * the migration and in the background, so the start does not wait for it. The build waits for every transaction that
- * started before it, e.g. a long backup; the outbox works without the index meanwhile, only its polls are slower.
- *
- * One instance builds it at a time (an advisory lock), so another one does not drop the index that is being built. An
- * index left invalid by a failed build is dropped and built again. When the build fails, Hermes warns
- * (`process.emitWarning`) and the next start tries again.
+ * Warns (`process.emitWarning`) when the index of the polling outbox is missing or invalid. Hermes creates it only with
+ * an empty `asyncOutbox` table, because `CREATE INDEX` would stop the inserts of the application while it reads a big
+ * table, and `CREATE INDEX CONCURRENTLY` waits for all older transactions, so it does not belong in the start of an
+ * application. Build it yourself, e.g. after the upgrade.
  */
-const buildPendingIndex = async (sql: Sql): Promise<void> => {
-  try {
-    if ((await findPendingIndex(sql))?.isValid) {
-      return
-    }
+const warnAboutPendingIndex = async (sql: ReservedSql) => {
+  const index = await findPendingIndex(sql)
 
-    const connection = await sql.reserve()
-
-    try {
-      const [{ locked }] = await connection<{ locked: boolean }[]>`
-        SELECT pg_try_advisory_lock(${MigrationLock.classId}::int, ${IndexBuildLockObjectId}::int) AS "locked"
-      `
-
-      if (!locked) {
-        return
-      }
-
-      try {
-        const index = await findPendingIndex(connection)
-
-        if (index && !index.isValid) {
-          await connection`DROP INDEX CONCURRENTLY IF EXISTS "asyncOutboxPendingIdx"`
-        }
-        if (!index?.isValid) {
-          await connection.unsafe(PendingIndexDefinition)
-        }
-      } finally {
-        await swallow(
-          () => connection`SELECT pg_advisory_unlock(${MigrationLock.classId}::int, ${IndexBuildLockObjectId}::int)`,
-        )
-      }
-    } finally {
-      connection.release()
-    }
-  } catch (error) {
-    process.emitWarning(
-      `Hermes could not build the index "asyncOutboxPendingIdx" (${String(error)}). The polling outbox works without ` +
-        `it, but its polls are slower. The next start tries again, or build it yourself: ${PendingIndexDefinition}`,
-      { code: 'HERMES_INDEX_NOT_BUILT' },
-    )
+  if (index?.isValid) {
+    return
   }
+
+  process.emitWarning(
+    'The index "asyncOutboxPendingIdx" of the polling outbox is ' +
+      (index ? 'invalid' : 'missing') +
+      '. The polling outbox works without it, but its polls read the whole "asyncOutbox" table. Build it: ' +
+      (index ? 'DROP INDEX CONCURRENTLY "asyncOutboxPendingIdx"; ' : '') +
+      PendingIndexDefinition,
+    { code: 'HERMES_INDEX_MISSING' },
+  )
 }
 
 const migrateSchema = async (sql: ReservedSql, slotName: string) => {
@@ -313,12 +278,21 @@ const migrateSchema = async (sql: ReservedSql, slotName: string) => {
           ALTER TABLE "asyncOutboxPartition" ALTER COLUMN "partitionKey" TYPE VARCHAR(250);
         END IF;
 
+        IF to_regclass(format('%I.%I', current_schema(), 'asyncOutboxPendingIdx')) IS NULL
+          AND NOT EXISTS (SELECT 1 FROM "asyncOutbox")
+        THEN
+          CREATE INDEX IF NOT EXISTS "asyncOutboxPendingIdx" ON "asyncOutbox" ("consumerName", "partitionKey", "position")
+          WHERE "delivered" = false;
+        END IF;
+
         IF to_regclass(format('%I.%I', current_schema(), 'consumerNameIdx')) IS NULL THEN
           CREATE UNIQUE INDEX IF NOT EXISTS "consumerNameIdx" ON "outboxConsumer" ("consumerName" DESC, "partitionKey");
         END IF;
       END $$;
     `,
   )
+
+  await warnAboutPendingIndex(sql)
 
   await sql.unsafe(`
     DO $$
