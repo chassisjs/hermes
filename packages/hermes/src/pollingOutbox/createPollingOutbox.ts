@@ -94,26 +94,43 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
   }
 
   /**
-   * Publishes the claimed lanes and renews their claims meanwhile. A lane stops taking new messages when its claim was
-   * not renewed for two thirds of the lease, so it does not go on when another instance may have taken it over. At
-   * the end, it waits for the renewal in progress at most one lease, so a renewal that hangs does not stop the outbox.
+   * Publishes the claimed lanes and renews their claims meanwhile. A lane stops taking new messages when a renewal says
+   * that a claim was lost, or when the claim was not renewed for two thirds of the lease, so it does not go on when
+   * another instance may have taken it over. A renewal that does not end within a lease is given up, so a hanging
+   * query does not stop the next renewals or the end of the batch.
    */
   const publishLanes = async (lanes: PollingLane<Message>[], stopping: AbortSignal, claimedAt: number) => {
     let renewedAt = claimedAt
-    const hasClaim = () => Date.now() - renewedAt < lease.ms - Math.floor(lease.ms / 3)
+    let isClaimLost = false
+    const hasClaim = () => !isClaimLost && Date.now() - renewedAt < lease.ms - Math.floor(lease.ms / 3)
+    const renew = async () => {
+      const startedAt = Date.now()
+      const timeout = new AbortController()
+
+      try {
+        const isClaimed = await Promise.race([
+          policy.renew({ owner, lease, lanes }),
+          setTimeout(lease.ms, undefined, { signal: timeout.signal }).then(() => {
+            throw new Error('Renewing the claims timed out.')
+          }),
+        ])
+
+        if (isClaimed) {
+          renewedAt = Math.max(renewedAt, startedAt)
+        } else {
+          isClaimLost = true
+        }
+      } catch (error) {
+        onDbError(error)
+      } finally {
+        timeout.abort()
+      }
+    }
     const renewal = setInterval(
       () => {
-        const startedAt = Date.now()
-
-        renewing ??= policy
-          .renew({ owner, lease, lanes })
-          .then(() => {
-            renewedAt = Math.max(renewedAt, startedAt)
-          })
-          .catch(onDbError)
-          .finally(() => {
-            renewing = undefined
-          })
+        renewing ??= renew().finally(() => {
+          renewing = undefined
+        })
       },
       Math.max(Math.floor(lease.ms / 3), 1),
     )
@@ -122,11 +139,7 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
       await Promise.all(lanes.map((lane) => publishLane(lane, stopping, hasClaim)))
     } finally {
       clearInterval(renewal)
-
-      const waiting = new AbortController()
-
-      await Promise.race([renewing, setTimeout(lease.ms, undefined, { signal: waiting.signal }).catch(noop)])
-      waiting.abort()
+      await renewing
     }
   }
 

@@ -90,8 +90,11 @@ type PartitionClaimingStore<Message> = PollingOutboxBaseStore<Message> & {
 
   /**
    * Extends the claim of the partitions that are still claimed by `owner`.
+   *
+   * @returns The number of partitions it renewed, so the polling outbox stops publishing a partition that another
+   * instance took over. Return nothing when the store cannot tell.
    */
-  renewPartitions(params: { owner: string; lease: Duration; partitionKeys: string[] }): Promise<void>
+  renewPartitions(params: { owner: string; lease: Duration; partitionKeys: string[] }): Promise<number | void>
 
   /**
    * Releases all the partitions claimed by `owner`, so that other instances can take them at once.
@@ -128,8 +131,11 @@ type PollingPolicy<Message> = PollingOutboxBaseStore<Message> & {
 
   /**
    * Extends the claims of the lanes that are still being published.
+   *
+   * @returns `false` when `owner` lost a claim of the lanes, e.g. because another instance took it over after it
+   * expired, so the polling outbox stops publishing them
    */
-  renew(params: { owner: string; lease: Duration; lanes: PollingLane<Message>[] }): Promise<void>
+  renew(params: { owner: string; lease: Duration; lanes: PollingLane<Message>[] }): Promise<boolean>
 
   /**
    * Releases all the claims of `owner`. Called when the polling outbox stops.

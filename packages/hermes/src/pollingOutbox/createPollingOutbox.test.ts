@@ -91,10 +91,13 @@ const createInMemoryStore = () => {
         .map(toMessage)
     },
     async renewPartitions({ owner, lease, partitionKeys }) {
-      partitionKeys
+      const renewed = partitionKeys
         .map((key) => partitions.get(key))
         .filter((partition) => partition?.claimedBy === owner)
-        .forEach((partition) => (partition!.claimedUntil = Date.now() + lease.ms))
+
+      renewed.forEach((partition) => (partition!.claimedUntil = Date.now() + lease.ms))
+
+      return renewed.length
     },
     async releasePartitions({ owner }) {
       partitions.forEach((partition) => {
@@ -297,7 +300,7 @@ describe('createPollingOutbox with usePartitionOrderingPolicy', () => {
 
     const stop = createPollingOutbox({
       ...fast,
-      lease: Duration.ofMiliseconds(30),
+      lease: Duration.ofMiliseconds(150),
       owner: 'first',
       policy: usePartitionOrderingPolicy({
         ...store,
@@ -305,18 +308,68 @@ describe('createPollingOutbox with usePartitionOrderingPolicy', () => {
           renewals++
           running++
           overlapped ||= running > 1
-          await setTimeout(50)
+          await setTimeout(80)
           await store.renewPartitions(params)
           running--
         },
       }),
-      publish: () => setTimeout(200),
+      publish: () => setTimeout(400),
     }).start()
 
     await waitUntil(() => renewals >= 2)
     await stop()
 
     expect(overlapped).toBe(false)
+  })
+
+  test('a lane stops when a renewal says that another instance took the partition over', async () => {
+    const { store, add } = createInMemoryStore()
+    const published: string[] = []
+
+    for (let id = 1; id <= 20; id++) {
+      add(id)
+    }
+
+    const stop = createPollingOutbox({
+      ...fast,
+      lease: Duration.ofMiliseconds(600),
+      owner: 'first',
+      policy: usePartitionOrderingPolicy({
+        ...store,
+        claimPartitions: async (params) => (published.length ? [] : store.claimPartitions(params)),
+        renewPartitions: async () => 0,
+      }),
+      publish: async (message) => {
+        published.push(String(message.id))
+        await setTimeout(50)
+      },
+    }).start()
+
+    await setTimeout(1500)
+    await stop()
+
+    expect(published.length).toBeLessThan(10)
+  })
+
+  test('a renewal that hangs is given up after a lease, so the next renewals go on', async () => {
+    const { store, add } = createInMemoryStore()
+    let renewals = 0
+
+    add(1)
+
+    const stop = createPollingOutbox({
+      ...fast,
+      lease: Duration.ofMiliseconds(60),
+      owner: 'first',
+      policy: usePartitionOrderingPolicy({
+        ...store,
+        renewPartitions: (params) => (++renewals === 1 ? new Promise<void>(() => {}) : store.renewPartitions(params)),
+      }),
+      publish: () => setTimeout(300),
+    }).start()
+
+    await waitUntil(() => renewals >= 3)
+    await stop()
   })
 
   test('stop releases the partitions after the renewal in progress ends', async () => {

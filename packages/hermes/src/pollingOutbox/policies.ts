@@ -58,9 +58,13 @@ const usePartitionOrderingPolicy = <Message>(
     async renew({ owner, lease, lanes }) {
       const partitionKeys = partitionsOf(lanes)
 
-      if (partitionKeys.length) {
-        await store.renewPartitions({ owner, lease, partitionKeys })
+      if (!partitionKeys.length) {
+        return true
       }
+
+      const renewed = await store.renewPartitions({ owner, lease, partitionKeys })
+
+      return renewed === undefined || renewed >= partitionKeys.length
     },
 
     async release({ owner }) {
@@ -101,6 +105,8 @@ const useNoOrderingPolicy = <Message>(store: MessageClaimingStore<Message>): Pol
     if (messages.length) {
       await store.renewMessages({ owner, lease, messages })
     }
+
+    return true
   },
 
   async release({ owner }) {
