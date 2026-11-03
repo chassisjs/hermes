@@ -116,7 +116,7 @@ describe('Migrations', () => {
     })
   })
 
-  test('migrate on a polling pool keeps the short table lock timeout of the pool', async () => {
+  test('migrate gives the connection its own table lock timeout back', async () => {
     await mysql.withDatabase(async ({ options }) => {
       const pollingPool = createPollingPool(options, 1)
 

@@ -4,7 +4,7 @@ import {
   type PartitionClaimingStore,
   type PolledMessage,
 } from '@chassisjs/hermes'
-import { type Pool, type RowDataPacket } from 'mysql2/promise'
+import { type Pool, type ResultSetHeader, type RowDataPacket } from 'mysql2/promise'
 import { inTransaction, OutboxTable, PartitionTable, retryOnLockWaitTimeout } from './sql.js'
 
 type OutboxRow<Message> = RowDataPacket & {
@@ -282,14 +282,16 @@ const createPollingStore = <Message>(
     },
 
     async renewPartitions({ owner, lease, partitionKeys }) {
-      await retryOnLockWaitTimeout(() =>
-        getPool().query(
+      const [result] = await retryOnLockWaitTimeout(() =>
+        getPool().query<ResultSetHeader>(
           `UPDATE \`${PartitionTable}\`
          SET \`claimed_until\` = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND)
          WHERE \`consumer_name\` = ? AND \`partition_key\` IN (?) AND \`claimed_by\` = ?`,
           [microseconds(lease), consumerName, partitionKeys, owner],
         ),
       )
+
+      return result.affectedRows
     },
 
     async releasePartitions({ owner }) {

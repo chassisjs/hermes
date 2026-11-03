@@ -1,4 +1,5 @@
 import { Duration } from '@chassisjs/hermes'
+import { setTimeout } from 'node:timers/promises'
 import { type Pool, type RowDataPacket } from 'mysql2/promise'
 import { MigrationTable, OutboxTable, PartitionTable } from './sql.js'
 
@@ -61,9 +62,10 @@ const migrations: Migration[] = [
  * keeps the versions that were applied.
  *
  * Many instances of the application can run it at the same time: they wait for each other on a named lock
- * (`GET_LOCK`) of the database, and every migration runs once. It waits for the locks of the tables as long as the
- * server allows (the global `lock_wait_timeout`), also on a connection of `createPollingPool`, which waits only
- * 5 seconds, and then sets the timeout of the connection back.
+ * (`GET_LOCK`) of the database, and every migration runs once. A statement waits for the lock of a table at most
+ * 5 seconds (`lock_wait_timeout`), because the waiting statement stops the queries of the application on that table,
+ * and then tries again a moment later, up to about a minute. The migrations are safe to run again, so a statement
+ * can be repeated. The connection gets its own `lock_wait_timeout` back afterwards.
  *
  * `createOutboxConsumer` runs it on `start()`. Call it yourself when you turn that off (`migrate: false`), e.g. in a
  * deployment pipeline with a user that can change the schema.
@@ -72,17 +74,36 @@ const migrations: Migration[] = [
  * @param options.lockTimeout - How long to wait for other instances that are migrating (default: 1 minute)
  * @returns The versions that this call applied
  */
+const TableLockWaitTimeoutSeconds = 5
+const TableLockAttempts = 10
+const LockWaitTimeoutErrno = 1205
+
+const retryOnTableLockTimeout = async <T>(statement: () => Promise<T>): Promise<T> => {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await statement()
+    } catch (error) {
+      if ((error as { errno?: number }).errno !== LockWaitTimeoutErrno || attempt >= TableLockAttempts) {
+        throw error
+      }
+
+      await setTimeout(Duration.ofSeconds(1).ms)
+    }
+  }
+}
+
 const migrate = async (pool: Pool, options?: { lockTimeout?: Duration }): Promise<number[]> => {
   const lockTimeout = options?.lockTimeout ?? Duration.ofMinutes(1)
   const connection = await pool.getConnection()
   const lockName = `CONCAT('hermes_migrations.', DATABASE())`
 
-  const [[{ sessionLockWaitTimeout }]] = await connection.query<RowDataPacket[]>(
-    'SELECT @@SESSION.lock_wait_timeout AS sessionLockWaitTimeout',
-  )
+  let sessionLockWaitTimeout: unknown
 
   try {
-    await connection.query('SET SESSION lock_wait_timeout = @@GLOBAL.lock_wait_timeout')
+    const [[session]] = await connection.query<RowDataPacket[]>('SELECT @@SESSION.lock_wait_timeout AS lockWaitTimeout')
+
+    sessionLockWaitTimeout = session.lockWaitTimeout
+    await connection.query('SET SESSION lock_wait_timeout = ?', [TableLockWaitTimeoutSeconds])
 
     const [[{ locked }]] = await connection.query<RowDataPacket[]>(`SELECT GET_LOCK(${lockName}, ?) AS locked`, [
       Math.ceil(lockTimeout.ms / 1000),
@@ -108,7 +129,7 @@ const migrate = async (pool: Pool, options?: { lockTimeout?: Duration }): Promis
 
       for (const { version, name, statements } of pending) {
         for (const statement of statements) {
-          await connection.query(statement)
+          await retryOnTableLockTimeout(() => connection.query(statement))
         }
 
         await connection.query(`INSERT INTO \`${MigrationTable}\` (\`version\`, \`name\`) VALUES (?, ?)`, [
@@ -123,7 +144,9 @@ const migrate = async (pool: Pool, options?: { lockTimeout?: Duration }): Promis
     }
   } finally {
     try {
-      await connection.query('SET SESSION lock_wait_timeout = ?', [Number(sessionLockWaitTimeout)])
+      if (sessionLockWaitTimeout !== undefined) {
+        await connection.query('SET SESSION lock_wait_timeout = ?', [Number(sessionLockWaitTimeout)])
+      }
       connection.release()
     } catch {
       connection.destroy()
