@@ -64,3 +64,9 @@ The publication is shared by the whole database, but `migrate` (`packages/hermes
 **Type:** improvement · **Package:** `@chassisjs/hermes`
 
 When `renewPartitions` renews fewer partitions than the batch has, the polling outbox (`packages/hermes/src/pollingOutbox/createPollingOutbox.ts`) stops all the lanes of the batch, also the ones whose claims are still held. It is safe, but it lowers the throughput when partitions are taken over often. Let the store return the renewed partition keys and stop only the lanes of the lost ones.
+
+## Fixed time limits of the migration locks
+
+**Type:** improvement · **Packages:** `@chassisjs/hermes-postgresql`, `@chassisjs/hermes-mysql`
+
+PostgreSQL gives up waiting for the advisory lock of the migration after 10 minutes, without an option to change it (`packages/hermes-postgresql/src/outbox/migrate.ts`), so a long repair of a big table can make the other instances fail and restart. MySQL waits for `GET_LOCK` up to 10 minutes (`packages/hermes-mysql/src/migrate.ts`), longer than a typical startup probe, and does not warn meanwhile, so a lock that is never released looks like silent restarts. Make both limits options and warn while waiting in MySQL too, like `HERMES_MIGRATION_LOCK` in PostgreSQL.

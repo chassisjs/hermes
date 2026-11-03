@@ -57,23 +57,6 @@ const migrations: Migration[] = [
   },
 ]
 
-/**
- * Creates or updates the Hermes tables: `hermes_outbox`, `hermes_outbox_partition` and `hermes_migrations`, which
- * keeps the versions that were applied.
- *
- * Many instances of the application can run it at the same time: they wait for each other on a named lock
- * (`GET_LOCK`) of the database, and every migration runs once. A statement waits for the lock of a table at most
- * 5 seconds (`lock_wait_timeout`), because the waiting statement stops the queries of the application on that table,
- * and then tries again a moment later, up to about a minute. The migrations are safe to run again, so a statement
- * can be repeated. The connection gets its own `lock_wait_timeout` back afterwards.
- *
- * `createOutboxConsumer` runs it on `start()`. Call it yourself when you turn that off (`migrate: false`), e.g. in a
- * deployment pipeline with a user that can change the schema.
- *
- * @param pool - A `mysql2` pool
- * @param options.lockTimeout - How long to wait for other instances that are migrating (default: 10 minutes)
- * @returns The versions that this call applied
- */
 const TableLockWaitTimeoutSeconds = 5
 const TableLockAttempts = 10
 const LockWaitTimeoutErrno = 1205
@@ -92,6 +75,23 @@ const retryOnTableLockTimeout = async <T>(statement: () => Promise<T>): Promise<
   }
 }
 
+/**
+ * Creates or updates the Hermes tables: `hermes_outbox`, `hermes_outbox_partition` and `hermes_migrations`, which
+ * keeps the versions that were applied.
+ *
+ * Many instances of the application can run it at the same time: they wait for each other on a named lock
+ * (`GET_LOCK`) of the database, and every migration runs once. A statement waits for the lock of a table at most
+ * 5 seconds (`lock_wait_timeout`), because the waiting statement stops the queries of the application on that table,
+ * and then tries again a moment later, up to about a minute. The migrations are safe to run again, so a statement
+ * can be repeated. The connection gets its own `lock_wait_timeout` back afterwards.
+ *
+ * `createOutboxConsumer` runs it on `start()`. Call it yourself when you turn that off (`migrate: false`), e.g. in a
+ * deployment pipeline with a user that can change the schema.
+ *
+ * @param pool - A `mysql2` pool
+ * @param options.lockTimeout - How long to wait for other instances that are migrating (default: 10 minutes)
+ * @returns The versions that this call applied
+ */
 const migrate = async (pool: Pool, options?: { lockTimeout?: Duration }): Promise<number[]> => {
   const lockTimeout = options?.lockTimeout ?? Duration.ofMinutes(10)
   const connection = await pool.getConnection()

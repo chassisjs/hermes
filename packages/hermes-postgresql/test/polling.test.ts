@@ -421,6 +421,37 @@ describe('Async outbox', () => {
     })
   })
 
+  test('an open transaction of the application postpones the index of a small table instead of failing the start', async () => {
+    await postgres(async (sql) => {
+      const emitWarning = jest.spyOn(process, 'emitWarning').mockImplementation(() => {})
+      const tx = await sql.reserve()
+
+      try {
+        await migrateTables(sql)
+        await sql`DROP INDEX "asyncOutboxPendingIdx"`
+        await tx`BEGIN`
+        await tx`
+          INSERT INTO "asyncOutbox" ("consumerName", "messageId", "messageType", "data")
+          VALUES ('app', 'uncommitted', 'Test', '{}'::jsonb)
+        `
+
+        await migrateTables(sql)
+
+        expect(emitWarning).toHaveBeenCalledWith(expect.stringContaining('missing'), { code: 'HERMES_INDEX_MISSING' })
+
+        await tx`COMMIT`
+        await migrateTables(sql)
+
+        expect(await sql`SELECT 1 AS "exists" FROM pg_class WHERE relname = 'asyncOutboxPendingIdx'`).toEqual([
+          { exists: 1 },
+        ])
+      } finally {
+        tx.release()
+        emitWarning.mockRestore()
+      }
+    })
+  })
+
   test('repairs the async outbox migrated by earlier builds and migrates again without waiting for open transactions', async () => {
     await postgres(async (sql) => {
       await migrateTables(sql)

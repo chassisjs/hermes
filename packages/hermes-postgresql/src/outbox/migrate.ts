@@ -19,6 +19,7 @@ export const dropReplicationSlot = async (sql: Sql, slotName: SlotName) => {
 const MigrationLock = { classId: 0x48524d53, objectId: 1 }
 const LockTimeoutAttempts = 20
 const LockNotAvailable = '55P03'
+const SmallTableRows = 10_000
 const MigrationLockWarningAfter = Duration.ofSeconds(30)
 const MigrationLockTimeout = Duration.ofMinutes(10)
 
@@ -142,8 +143,36 @@ const findPendingIndex = async (sql: Sql | ReservedSql) => {
 }
 
 /**
+ * Creates the index of the polling outbox when `asyncOutbox` is small, so the build takes a moment. It is a separate
+ * step, after the upgrade of the tables: when it cannot lock the table within `lock_timeout`, e.g. behind a long
+ * transaction of the application, it gives up without failing the start, and {@link warnAboutPendingIndex} warns.
+ * The next start tries again.
+ */
+const createPendingIndexOfSmallTable = async (sql: ReservedSql) => {
+  try {
+    await sql.unsafe(`
+      DO $$
+      BEGIN
+        PERFORM set_config('lock_timeout', '500ms', true);
+
+        IF to_regclass(format('%I.%I', current_schema(), 'asyncOutboxPendingIdx')) IS NULL
+          AND (SELECT COUNT(*) FROM (SELECT 1 FROM "asyncOutbox" LIMIT ${SmallTableRows + 1}) AS "rows") <= ${SmallTableRows}
+        THEN
+          CREATE INDEX IF NOT EXISTS "asyncOutboxPendingIdx" ON "asyncOutbox" ("consumerName", "partitionKey", "position")
+          WHERE "delivered" = false;
+        END IF;
+      END $$;
+    `)
+  } catch (error) {
+    if ((error as { code?: string }).code !== LockNotAvailable) {
+      throw error
+    }
+  }
+}
+
+/**
  * Warns (`process.emitWarning`) when the index of the polling outbox is missing or invalid. Hermes creates it only
- * when `asyncOutbox` has at most 10 000 rows, because `CREATE INDEX` would stop the inserts of the application while
+ * when `asyncOutbox` has at most {@link SmallTableRows} rows ({@link createPendingIndexOfSmallTable}), because `CREATE INDEX` would stop the inserts of the application while
  * it reads a big table, and `CREATE INDEX CONCURRENTLY` waits for all older transactions, so it does not belong in the start of an
  * application. Build it yourself, e.g. after the upgrade.
  */
@@ -287,13 +316,6 @@ const migrateSchema = async (sql: ReservedSql, slotName: string) => {
           ALTER TABLE "asyncOutboxPartition" ALTER COLUMN "partitionKey" TYPE VARCHAR(250);
         END IF;
 
-        IF to_regclass(format('%I.%I', current_schema(), 'asyncOutboxPendingIdx')) IS NULL
-          AND (SELECT COUNT(*) FROM (SELECT 1 FROM "asyncOutbox" LIMIT 10001) AS "rows") <= 10000
-        THEN
-          CREATE INDEX IF NOT EXISTS "asyncOutboxPendingIdx" ON "asyncOutbox" ("consumerName", "partitionKey", "position")
-          WHERE "delivered" = false;
-        END IF;
-
         IF to_regclass(format('%I.%I', current_schema(), 'consumerNameIdx')) IS NULL THEN
           CREATE UNIQUE INDEX IF NOT EXISTS "consumerNameIdx" ON "outboxConsumer" ("consumerName" DESC, "partitionKey");
         END IF;
@@ -301,6 +323,7 @@ const migrateSchema = async (sql: ReservedSql, slotName: string) => {
     `,
   )
 
+  await createPendingIndexOfSmallTable(sql)
   await warnAboutPendingIndex(sql)
 
   await sql.unsafe(`
