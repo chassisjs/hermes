@@ -11,6 +11,8 @@ type EventStorePollingStoreScope = {
    * Where a consumer without checkpoints starts: at the first event of every stream, or after the last event of every
    * stream that exists when it starts for the first time. Streams created later are read from their first event.
    *
+   * A single-stream projection started from the end still builds a new document from all the events of its stream.
+   *
    * @defaultValue `'beginning'`
    */
   startFrom?: 'beginning' | 'end'
@@ -117,10 +119,12 @@ const createEventStorePollingStore = (
         return rows.map((row) => String(row.stream_id))
       }
       const fromCursor = await find(cursor, limit)
-      // wrap around: the streams before the cursor, without those already found
+      // Wrap around: the streams from the beginning, without those already found. With fewer than `limit` found after
+      // the cursor, those are all the changed streams after it, so the rest are before it. (No comparison of ids in
+      // JavaScript: its order of strings differs from the binary collation of MySQL.)
       const wrapped =
         cursor !== undefined && fromCursor.length < limit
-          ? (await find(undefined, limit)).filter((id) => id <= cursor! && !fromCursor.includes(id))
+          ? (await find(undefined, limit)).filter((id) => !fromCursor.includes(id))
           : []
       const changed = [...fromCursor, ...wrapped].slice(0, limit)
 

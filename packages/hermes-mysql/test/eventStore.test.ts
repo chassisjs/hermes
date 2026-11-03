@@ -1,4 +1,10 @@
-import { createCommandHandler, defineHermesProjection, Duration, VersionConflictError } from '@chassisjs/hermes'
+import {
+  createCommandHandler,
+  defineHermesProjection,
+  Duration,
+  type HermesProjection,
+  VersionConflictError,
+} from '@chassisjs/hermes'
 import { afterAll, beforeAll, describe, expect, jest, test } from '@jest/globals'
 import { type Pool, type PoolConnection, type RowDataPacket } from 'mysql2/promise'
 import { setTimeout } from 'node:timers/promises'
@@ -1595,6 +1601,71 @@ describe('A projection added to a running application', () => {
         data: { status: 'completed', occurrenceId: 'o-1', dueAt: PAST },
         version: 2n,
       })
+    })
+  })
+})
+
+describe('Deleted and not yet handled documents', () => {
+  test('a decider gets the initial state again after its document was deleted', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool, { eventStore: true })
+      const closing = defineHermesProjection<Occurrence | null, SchedulingEvent>()
+        .ofName('closing')
+        .ofDocumentType()
+        .ofEvents('OccurrenceScheduled', 'OccurrenceBecameDueNow', 'TaskCompleted', 'NoteAdded')
+        .ofInitialState(scheduling.initialState)
+        .ofEvolve((state, event) =>
+          event.type === 'TaskCompleted' ? null : scheduling.evolve(state ?? scheduling.initialState(), event),
+        )
+        .inline()
+        .done()
+      const eventStore = createEventStore(pool, { projections: [closing] })
+      const decide = jest.fn(scheduling.decide)
+      const handle = createCommandHandler({
+        decider: { ...scheduling, decide },
+        eventStore,
+        loadState: fromInlineProjection(
+          eventStore,
+          closing as unknown as HermesProjection<Occurrence, SchedulingEvent>,
+        ),
+      })
+
+      await handle('task-1', schedule('o-1', FUTURE))
+      await handle('task-1', complete('o-1'))
+      expect(await eventStore.readProjection(closing, 'task-1')).toBeNull()
+
+      await expect(handle('task-1', schedule('o-2', FUTURE))).resolves.toMatchObject({ nextVersion: 3n })
+      expect(decide.mock.calls[2][1]).toEqual(scheduling.initialState())
+    })
+  })
+
+  test('a single-stream document records the events it skipped, so the catch-up runs once', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool, { eventStore: true })
+      const completions = defineHermesProjection<{ completed: number }, SchedulingEvent>()
+        .ofName('completions')
+        .ofDocumentType()
+        .ofEvents('TaskCompleted')
+        .ofInitialState(() => ({ completed: 0 }))
+        .ofEvolve((state) => ({ completed: state.completed + 1 }))
+        .inline()
+        .done()
+      const eventStore = createEventStore(pool, { projections: [completions] })
+
+      for (const text of ['a', 'b', 'c']) {
+        await eventStore.appendToStream<SchedulingEvent>('task-1', [note(text)])
+      }
+
+      expect(await eventStore.readProjection(completions, 'task-1')).toBeNull()
+      expect(
+        await select(pool, 'SELECT `version` FROM `hermes_projection_versions` WHERE `name` = ? AND `id` = ?', [
+          'completions',
+          'task-1',
+        ]),
+      ).toEqual([{ version: '3' }])
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [completed('o-1')])
+      expect(await eventStore.readProjection(completions, 'task-1')).toEqual({ data: { completed: 1 }, version: 4n })
     })
   })
 })

@@ -42,7 +42,10 @@ type EventStoreConsumerBaseParams = {
   pollingConnectionLimit?: number
   /** Whether `start()` runs the migrations of the outbox and of the event store. @defaultValue `true` */
   migrate?: boolean
-  /** Where a consumer without checkpoints starts. @defaultValue `'beginning'` */
+  /**
+   * Where a consumer without checkpoints starts. A single-stream projection started from the end still builds a new
+   * document from all the events of its stream. @defaultValue `'beginning'`
+   */
   startFrom?: 'beginning' | 'end'
   /** Called when an event cannot be published. */
   onFailedPublish?: (error: unknown) => void

@@ -145,6 +145,10 @@ const setVersion = async (
 /**
  * The events of a stream before a position, with a locking read (the latest committed rows, whatever the snapshot of
  * the transaction is). The row of the stream is locked by the append, so they do not change meanwhile.
+ *
+ * In `REPEATABLE READ`, the read takes next-key locks on the range, including the gap before the first event of the
+ * stream, so until the transaction of the application commits, it blocks the first event of a new stream whose id
+ * sorts just before it. It runs at most once per stream and document.
  */
 const readEventsBefore = async (ex: Queryable, streamId: string, before: bigint) => {
   const [rows] = await ex.query<EventRow[]>(
@@ -197,6 +201,17 @@ const applyToDocument = async (
   if (!fresh.length || (!handled.length && data === null)) {
     if (data === null) {
       await ex.query(`DELETE FROM \`${ProjectionsTable}\` WHERE \`name\` = ? AND \`id\` = ?`, [name, documentId])
+    }
+
+    // A single-stream document without handled events yet still records how far its stream was read, so that the
+    // catch-up from the earlier events runs at most once per stream.
+    if (fresh.length && projection.isSingleStream) {
+      await setVersion(
+        ex,
+        { name, id: documentId, streamId },
+        fresh[fresh.length - 1].streamPosition,
+        versions.length > 0,
+      )
     }
 
     return

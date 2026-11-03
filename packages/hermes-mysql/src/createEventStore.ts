@@ -297,7 +297,8 @@ const fromInlineProjection = <State, E extends Event>(
     const { events, currentVersion } = await eventStore.readStream<E>(streamId, { tx })
 
     return {
-      state: events.length ? applyProjection(projection, null, events) : projection.initialState(),
+      // a document deleted by `evolve` (null) is the initial state again
+      state: (events.length ? applyProjection(projection, null, events) : null) ?? projection.initialState(),
       version: currentVersion,
     }
   }
