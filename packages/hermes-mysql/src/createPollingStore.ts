@@ -32,8 +32,10 @@ const microseconds = (duration: Duration) => Math.round(duration.ms * 1000)
  * `usePartitionOrderingPolicy` and `useNoOrderingPolicy`.
  *
  * The claims use `SELECT ... FOR UPDATE SKIP LOCKED` (MySQL 8.0+), and all the times are computed with the clock of
- * MySQL. The pool has to run its connections in `READ COMMITTED` ({@link createPollingPool}), so that the store locks
- * only the rows it changes, not the gaps between them, and does not block the inserts of the application.
+ * MySQL. The claims run in `READ COMMITTED` transactions whatever the isolation level of the pool is, so that they do
+ * not lock the gaps between the rows and do not block the inserts of the application. The other statements change the
+ * rows of `hermes_outbox` by their primary key, which locks only those rows in `REPEATABLE READ` too. Still, use a
+ * pool of {@link createPollingPool}, whose connections run in `READ COMMITTED`.
  *
  * `claimPartitions` first finds the partitions with undelivered messages with a skip scan of an index (one index
  * lookup per partition), so the cost of a poll does not grow with the number of undelivered messages, but it grows
@@ -49,7 +51,7 @@ const microseconds = (duration: Duration) => Math.round(duration.ms * 1000)
  * `markFailed` changes a message only when `owner` still has the claim of the message, or of its partition when the
  * message itself is not claimed (`usePartitionOrderingPolicy`).
  *
- * @param getPool - Returns the `mysql2` pool, in `READ COMMITTED` ({@link createPollingPool})
+ * @param getPool - Returns the `mysql2` pool, preferably of {@link createPollingPool}
  * @param scope - The consumer and, optionally, the partition whose messages the store reads
  */
 const createPollingStore = <Message>(
@@ -111,9 +113,11 @@ const createPollingStore = <Message>(
     async claimMessages({ owner, lease, limit }) {
       const { where, params } = inScope('m')
 
-      return inTransaction(getPool(), async (connection) => {
-        const [rows] = await connection.query<OutboxRow<Message>[]>(
-          `SELECT ${Columns} FROM \`${OutboxTable}\` m
+      return inTransaction(
+        getPool(),
+        async (connection) => {
+          const [rows] = await connection.query<OutboxRow<Message>[]>(
+            `SELECT ${Columns} FROM \`${OutboxTable}\` m
            WHERE ${where}
              AND m.\`delivered_at\` IS NULL
              AND (m.\`next_attempt_at\` IS NULL OR m.\`next_attempt_at\` <= NOW(6))
@@ -121,20 +125,22 @@ const createPollingStore = <Message>(
            ORDER BY m.\`position\`
            LIMIT ?
            FOR UPDATE SKIP LOCKED`,
-          [...params, limit],
-        )
+            [...params, limit],
+          )
 
-        if (rows.length) {
-          await connection.query(
-            `UPDATE \`${OutboxTable}\`
+          if (rows.length) {
+            await connection.query(
+              `UPDATE \`${OutboxTable}\`
              SET \`claimed_by\` = ?, \`claimed_until\` = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND)
              WHERE \`position\` IN (?)`,
-            [owner, microseconds(lease), rows.map(({ position }) => position)],
-          )
-        }
+              [owner, microseconds(lease), rows.map(({ position }) => position)],
+            )
+          }
 
-        return rows.map(toMessage)
-      })
+          return rows.map(toMessage)
+        },
+        { readCommitted: true },
+      )
     },
 
     async renewMessages({ owner, lease, messages }) {
@@ -215,9 +221,11 @@ const createPollingStore = <Message>(
         )
       }
 
-      return inTransaction(pool, async (connection) => {
-        const [rows] = await connection.query<RowDataPacket[]>(
-          `SELECT p.\`partition_key\` FROM \`${PartitionTable}\` p
+      return inTransaction(
+        pool,
+        async (connection) => {
+          const [rows] = await connection.query<RowDataPacket[]>(
+            `SELECT p.\`partition_key\` FROM \`${PartitionTable}\` p
            WHERE ${partitionWhere}
              AND (p.\`claimed_by\` = ? OR p.\`claimed_until\` IS NULL OR p.\`claimed_until\` < NOW(6))
              AND (
@@ -232,21 +240,23 @@ const createPollingStore = <Message>(
            ORDER BY p.\`claimed_until\`
            LIMIT ?
            FOR UPDATE OF p SKIP LOCKED`,
-          [...partitionParams, owner, limit],
-        )
-        const partitionKeys = rows.map((row) => String(row.partition_key))
+            [...partitionParams, owner, limit],
+          )
+          const partitionKeys = rows.map((row) => String(row.partition_key))
 
-        if (partitionKeys.length) {
-          await connection.query(
-            `UPDATE \`${PartitionTable}\`
+          if (partitionKeys.length) {
+            await connection.query(
+              `UPDATE \`${PartitionTable}\`
              SET \`claimed_by\` = ?, \`claimed_until\` = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND)
              WHERE \`consumer_name\` = ? AND \`partition_key\` IN (?)`,
-            [owner, microseconds(lease), consumerName, partitionKeys],
-          )
-        }
+              [owner, microseconds(lease), consumerName, partitionKeys],
+            )
+          }
 
-        return partitionKeys
-      })
+          return partitionKeys
+        },
+        { readCommitted: true },
+      )
     },
 
     async readPartition({ partitionKey, limit }) {

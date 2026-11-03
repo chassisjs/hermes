@@ -586,24 +586,49 @@ describe('Review fixes', () => {
     })
   })
 
-  test('stop() closes only the pool that Hermes polls with, which runs in READ COMMITTED', async () => {
-    await mysql.withDatabase(async ({ options, onDispose }) => {
-      const outbox = createConsumer(options, () => {})
-      const pollingPool = createPollingPool(options)
-
-      onDispose(() => pollingPool.end())
+  test('Hermes polls with its own pool in READ COMMITTED, also with resetOnRelease, and stop() closes only that pool', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const published: string[] = []
+      const outbox = createConsumer({ ...options, resetOnRelease: true }, ({ messageId }) => {
+        published.push(messageId)
+      })
+      const pollingConnections = () =>
+        select<{ isolation: string }>(
+          pool,
+          `SELECT v.VARIABLE_VALUE AS isolation
+           FROM performance_schema.session_connect_attrs a
+           JOIN performance_schema.threads t ON t.PROCESSLIST_ID = a.PROCESSLIST_ID
+           JOIN performance_schema.variables_by_thread v ON v.THREAD_ID = t.THREAD_ID
+           WHERE a.ATTR_NAME = 'program_name' AND a.ATTR_VALUE = 'hermes-polling'
+             AND v.VARIABLE_NAME = 'transaction_isolation'`,
+        )
 
       const stop = await outbox.start()
 
-      await outbox.queue(envelope('m1'))
+      for (let i = 0; i < 20; i++) {
+        await outbox.queue(envelope(`m${i}`), { partitionKey: `p${i % 4}` })
+      }
+      await waitUntil(() => published.length === 20)
+
+      const connections = await pollingConnections()
+
+      expect(connections.length).toBeGreaterThan(0)
+      expect(connections.length).toBeLessThanOrEqual(3)
+      expect(new Set(connections.map(({ isolation }) => isolation))).toEqual(new Set(['READ-COMMITTED']))
+
       await stop()
 
       expect(await select(outbox.getDbConnection(), 'SELECT @@transaction_isolation AS `isolation`')).toEqual([
         { isolation: 'REPEATABLE-READ' },
       ])
-      expect(await select(pollingPool, 'SELECT @@transaction_isolation AS `isolation`')).toEqual([
-        { isolation: 'READ-COMMITTED' },
-      ])
+
+      const deadline = Date.now() + Duration.ofSeconds(10).ms
+
+      while ((await pollingConnections()).length && Date.now() < deadline) {
+        await setTimeout(50)
+      }
+
+      expect(await pollingConnections()).toEqual([])
     })
   })
 

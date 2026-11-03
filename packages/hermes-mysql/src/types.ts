@@ -150,6 +150,14 @@ type ConsumerCreationParams<Message extends JSONValue> = {
   retry?: RetryPolicy
 
   /**
+   * The maximum number of connections of the pool that Hermes polls with. It is apart from the pool of
+   * {@link OutboxConsumer.getDbConnection}, so count both against `max_connections` of MySQL.
+   *
+   * @defaultValue `3`
+   */
+  pollingConnectionLimit?: number
+
+  /**
    * Whether `start()` runs the migrations of the Hermes tables. Turn it off when you run {@link migrate} yourself,
    * e.g. in a deployment pipeline.
    *

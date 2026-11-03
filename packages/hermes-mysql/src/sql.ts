@@ -6,19 +6,34 @@ const OutboxTable = 'hermes_outbox'
 const PartitionTable = 'hermes_outbox_partition'
 const MigrationTable = 'hermes_migrations'
 const MaxRowsPerStatement = 1000
+const DefaultPollingConnectionLimit = 3
+const PollingProgramName = 'hermes-polling'
 
 /**
  * Creates the pool that Hermes polls the outbox with.
  *
- * Every connection of the pool runs in `READ COMMITTED`, so the locking reads (`FOR UPDATE SKIP LOCKED`) and the
- * statements that change rows lock only the rows, not the gaps between them, which would stop the application from
- * inserting new messages. Keep it apart from the pool of the application, so the isolation level of the application
- * does not change.
+ * Every connection of the pool runs in `READ COMMITTED`, so the statements of Hermes lock only the rows they change,
+ * not the gaps between them, which would stop the application from inserting new messages. `resetOnRelease` is
+ * turned off, because resetting a connection would bring back the default isolation level. When the isolation level
+ * of a new connection cannot be set, the connection is closed, the statement waiting for it fails, and the polling
+ * outbox tries again at the next poll.
+ *
+ * Keep it apart from the pool of the application, so the isolation level of the application does not change. Hermes
+ * needs only a few connections, so the pool has at most `connectionLimit` of them.
  *
  * @param options - The options of the `mysql2` pool
+ * @param connectionLimit - The maximum number of connections of the pool
  */
-const createPollingPool = (options: PoolOptions): Pool => {
-  const pool = createPool({ ...options, supportBigNumbers: true, bigNumberStrings: true })
+const createPollingPool = (options: PoolOptions, connectionLimit = DefaultPollingConnectionLimit): Pool => {
+  const pool = createPool({
+    ...options,
+    connectionLimit,
+    maxIdle: connectionLimit,
+    resetOnRelease: false,
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+    connectAttributes: { ...options.connectAttributes, program_name: PollingProgramName },
+  })
 
   pool.on('connection', (connection) => {
     connection.query('SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED', (error) => {
@@ -33,11 +48,21 @@ const createPollingPool = (options: PoolOptions): Pool => {
 
 /**
  * Runs `work` in a transaction on one connection of the pool.
+ *
+ * With `readCommitted`, the transaction runs in `READ COMMITTED` whatever the isolation level of the connection is,
+ * so its locking reads (`FOR UPDATE SKIP LOCKED`) do not lock the gaps between the rows.
  */
-const inTransaction = async <T>(pool: Pool, work: (connection: PoolConnection) => Promise<T>): Promise<T> => {
+const inTransaction = async <T>(
+  pool: Pool,
+  work: (connection: PoolConnection) => Promise<T>,
+  { readCommitted = false } = {},
+): Promise<T> => {
   const connection = await pool.getConnection()
 
   try {
+    if (readCommitted) {
+      await connection.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+    }
     await connection.beginTransaction()
 
     const result = await work(connection)
@@ -73,7 +98,7 @@ const insertStatements = (table: string, columns: Column[], rows: unknown[][]) =
  * more than {@link MaxRowsPerStatement} rows.
  */
 const insertRowsAtomically = async (
-  pool: Pool,
+  getPool: () => Pool,
   tx: QueryExecutor | undefined,
   table: string,
   columns: Column[],
@@ -89,14 +114,16 @@ const insertRowsAtomically = async (
   if (tx) {
     await run(tx)
   } else if (statements.length === 1) {
-    await pool.query(statements[0].text, statements[0].params)
+    await getPool().query(statements[0].text, statements[0].params)
   } else if (statements.length > 1) {
-    await inTransaction(pool, run)
+    await inTransaction(getPool(), run)
   }
 }
 
 export {
   createPollingPool,
+  DefaultPollingConnectionLimit,
+  PollingProgramName,
   inTransaction,
   insertRowsAtomically,
   insertStatements,

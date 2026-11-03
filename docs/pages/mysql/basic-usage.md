@@ -30,9 +30,9 @@ const outbox = createOutboxConsumer<DomainEvent>({
 const stop = await outbox.start()
 ```
 
-`start()` runs the migrations and starts polling with its own pool, whose connections run in `READ COMMITTED`. `stop()` waits for the message being published, releases the claims of this instance and closes that pool.
+`start()` runs the migrations and starts polling with its own pool, whose connections run in `READ COMMITTED`. It has at most 3 connections (`pollingConnectionLimit`), so count them against `max_connections` of MySQL. `stop()` waits for the message being published, releases the claims of this instance and closes that pool.
 
-`queue()` without `tx` and `getDbConnection()` use another pool, created on the first use. `stop()` does not close it, because your application may still use it, so close it when the application shuts down:
+`queue()` without `tx` and `getDbConnection()` use another pool, created on the first use (`queue()` with `tx` does not create it). `stop()` does not close it, because your application may still use it, so close it when the application shuts down, or its open connections keep the process running:
 
 ```typescript
 process.on('SIGTERM', async () => {

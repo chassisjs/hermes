@@ -17,9 +17,10 @@ import { type ConsumerCreationParams, type JSONValue, type OutboxConsumer } from
  *
  * Delivery is at-least-once, so make the handlers of the messages idempotent, e.g. with the `messageId`.
  *
- * `start()` polls with its own pool ({@link createPollingPool}), which runs in `READ COMMITTED`, and `stop()` closes
- * it. `queue()` without `tx` and `getDbConnection()` use another pool, which `stop()` does not close, because the
- * application may still use it; close it with `getDbConnection().end()`.
+ * `start()` polls with its own small pool ({@link createPollingPool}), which runs in `READ COMMITTED`, and `stop()`
+ * closes it. `queue()` without `tx` and `getDbConnection()` create another pool on their first use. `stop()` does not
+ * close it, because the application may still use it, so close it with `getDbConnection().end()`, or the open
+ * connections keep the process running. `queue()` with `tx` does not create it.
  *
  * @template Message - The type of the messages
  *
@@ -65,7 +66,7 @@ const createOutboxConsumer = <Message extends JSONValue>(
 
       isStarted = true
 
-      const pollingPool = createPollingPool(params.getOptions())
+      const pollingPool = createPollingPool(params.getOptions(), params.pollingConnectionLimit)
 
       try {
         if (params.migrate !== false) {
@@ -122,7 +123,7 @@ const createOutboxConsumer = <Message extends JSONValue>(
       const messages = Array.isArray(message) ? message : [message]
 
       await insertRowsAtomically(
-        getPool(),
+        getPool,
         options?.tx,
         OutboxTable,
         [
