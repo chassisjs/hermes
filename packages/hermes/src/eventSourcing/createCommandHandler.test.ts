@@ -1,5 +1,12 @@
 import { describe, expect, jest, test } from '@jest/globals'
-import { createCommandHandler, createInMemoryEventStore, VersionConflictError, type EventStore } from '../index.js'
+import {
+  createCommandHandler,
+  createInMemoryEventStore,
+  Duration,
+  useExponentialRetryPolicy,
+  VersionConflictError,
+  type EventStore,
+} from '../index.js'
 import {
   complete,
   completed,
@@ -171,6 +178,71 @@ describe('createCommandHandler', () => {
 
       await expect(handle('task-1', complete('o-1'))).rejects.toBeInstanceOf(NoOpenOccurrenceError)
       expect(decide).toHaveBeenCalledTimes(1)
+    })
+
+    test('waits the delay of the retry policy before every retry', async () => {
+      const store = createInMemoryEventStore()
+      await store.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', PAST)])
+      const delay = jest.fn((_attempts: number) => Duration.ofMiliseconds(50))
+      const handle = createCommandHandler({
+        decider: scheduling,
+        eventStore: withCompetingAppend(store, note('faster'), 2),
+        retry: { attempts: 3, delay },
+      })
+
+      const startedAt = Date.now()
+      const { newEvents } = await handle('task-1', tick(NOW))
+
+      expect(newEvents.map(({ type }) => type)).toEqual(['OccurrenceBecameDueNow'])
+      expect(delay.mock.calls.map(([attempts]) => attempts)).toEqual([1, 2])
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(90)
+    })
+
+    test('accepts the exponential retry policy of the core', async () => {
+      const store = createInMemoryEventStore()
+      await store.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', PAST)])
+      const handle = createCommandHandler({
+        decider: scheduling,
+        eventStore: withCompetingAppend(store, note('faster')),
+        retry: {
+          attempts: 5,
+          delay: useExponentialRetryPolicy({ initial: Duration.ofMiliseconds(5), max: Duration.ofMiliseconds(20) }),
+        },
+      })
+
+      await expect(handle('task-1', tick(NOW))).resolves.toMatchObject({ nextVersion: 3n })
+    })
+
+    test('an aborted signal stops waiting for a retry', async () => {
+      const store = createInMemoryEventStore()
+      await store.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', PAST)])
+      const decide = jest.fn(scheduling.decide)
+      const handle = createCommandHandler({
+        decider: { ...scheduling, decide },
+        eventStore: withCompetingAppend(store, note('faster')),
+        retry: { attempts: 3, delay: () => Duration.ofSeconds(10) },
+      })
+      const controller = new AbortController()
+
+      const startedAt = Date.now()
+      const result = handle('task-1', tick(NOW), { signal: controller.signal })
+      setTimeout(() => controller.abort(), 50)
+
+      await expect(result).rejects.toMatchObject({ name: 'AbortError' })
+      expect(Date.now() - startedAt).toBeLessThan(Duration.ofSeconds(1).ms)
+      expect(decide).toHaveBeenCalledTimes(1)
+    })
+
+    test('a signal aborted before the command stops it before deciding', async () => {
+      const eventStore = createInMemoryEventStore()
+      const decide = jest.fn(scheduling.decide)
+      const handle = createCommandHandler({ decider: { ...scheduling, decide }, eventStore })
+
+      await expect(handle('task-1', schedule('o-1', FUTURE), { signal: AbortSignal.abort() })).rejects.toMatchObject({
+        name: 'AbortError',
+      })
+      expect(decide).not.toHaveBeenCalled()
+      expect((await eventStore.readStream('task-1')).streamExists).toBe(false)
     })
 
     test('does not retry without a retry policy', async () => {

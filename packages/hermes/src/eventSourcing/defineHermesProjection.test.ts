@@ -217,6 +217,22 @@ describe('defineHermesProjection', () => {
       })
     })
 
+    test('an evolve that returns null deletes the document', () => {
+      const openPatients = defineHermesProjection<PriorityPatient | null, PatientEvent>()
+        .ofName('openPatients')
+        .ofDocumentType()
+        .ofEvents('PatientAdded', 'PatientRemoved')
+        .ofInitialState(() => null)
+        .ofEvolve((state, event) =>
+          event.type === 'PatientRemoved' ? null : { ...(state ?? initialPatient()), patientId: event.data.patientId },
+        )
+        .async()
+        .done()
+
+      expect(applyProjection(openPatients, null, [added(8)])).toMatchObject({ patientId: 8 })
+      expect(applyProjection(openPatients, null, [added(8), removed(8)])).toBeNull()
+    })
+
     test('returns the current state as it is when no event is handled', () => {
       const current = applyProjection(priorityPatients, null, [added(5)])
 

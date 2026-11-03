@@ -101,7 +101,7 @@ const eventCounter = defineHermesProjection<{ count: number }, SchedulingEvent>(
   .done()
 
 const setUp = async (pool: Pool) => {
-  await migrate(pool)
+  await migrate(pool, { eventStore: true })
 
   return createEventStore(pool, { projections: [occurrences] })
 }
@@ -116,19 +116,57 @@ const positionsBy = (published: HermesEventEnvelope<SchedulingEvent>[], streamId
 */
 
 describe('Migrations', () => {
-  test('migrate creates the tables of the event store', async () => {
+  test('the event store is opt-in: its own track of migrations, after the outbox', async () => {
     await mysql.withDatabase(async ({ pool }) => {
-      expect(await migrate(pool)).toEqual([1, 2])
-      expect(await select(pool, 'SELECT `version`, `name` FROM `hermes_migrations` ORDER BY `version`')).toEqual([
-        { version: 1, name: 'create the outbox' },
-        { version: 2, name: 'create the event store' },
+      const tables = async () =>
+        (await select<Record<string, string>>(pool, 'SHOW TABLES')).map((row) => Object.values(row)[0]).sort()
+
+      await migrate(pool)
+      expect(await tables()).toEqual(['hermes_migrations', 'hermes_outbox', 'hermes_outbox_partition'])
+
+      // the result lists the versions of the outbox, as before; the event store has its own table of versions
+      expect(await migrate(pool, { eventStore: true })).toEqual([])
+      expect(await tables()).toEqual([
+        'hermes_event_store_migrations',
+        'hermes_events',
+        'hermes_migrations',
+        'hermes_outbox',
+        'hermes_outbox_partition',
+        'hermes_projection_versions',
+        'hermes_projections',
+        'hermes_streams',
+        'hermes_subscriptions',
+      ])
+      expect(await select(pool, 'SELECT `version`, `name` FROM `hermes_event_store_migrations`')).toEqual([
+        { version: 1, name: 'create the event store' },
+      ])
+      expect(await select(pool, 'SELECT `version` FROM `hermes_migrations`')).toEqual([{ version: 1 }])
+    })
+  })
+
+  test('instances that start at the same time apply every migration of the event store once', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await Promise.all([
+        migrate(pool, { eventStore: true }),
+        migrate(pool, { eventStore: true }),
+        migrate(pool, { eventStore: true }),
       ])
 
-      const tables = (await select<Record<string, string>>(pool, 'SHOW TABLES')).map((row) => Object.values(row)[0])
+      expect(await select(pool, 'SELECT `version` FROM `hermes_event_store_migrations`')).toEqual([{ version: 1 }])
+      expect(await select(pool, 'SELECT `version` FROM `hermes_migrations`')).toEqual([{ version: 1 }])
+    })
+  })
 
-      expect(tables).toEqual(
-        expect.arrayContaining(['hermes_streams', 'hermes_events', 'hermes_subscriptions', 'hermes_projections']),
-      )
+  test('a consumer of the event store runs the migrations of the event store on start', async () => {
+    await mysql.withDatabase(async ({ pool, options }) => {
+      const stop = await createEventStoreConsumer<SchedulingEvent>({
+        getOptions: () => options,
+        consumerName: 'relay',
+        publish: () => {},
+      }).start()
+      await stop()
+
+      expect(await count(pool, 'SELECT COUNT(*) AS n FROM `hermes_event_store_migrations`')).toBe(1)
     })
   })
 })
@@ -509,7 +547,7 @@ describe('Inline projections', () => {
 
   test('an inline projection that throws rolls back the events and the document', async () => {
     await mysql.withDatabase(async ({ pool }) => {
-      await migrate(pool)
+      await migrate(pool, { eventStore: true })
       const strict = defineHermesProjection<{ texts: string[] }, SchedulingEvent>()
         .ofName('strict')
         .ofDocumentType()
@@ -538,7 +576,7 @@ describe('Inline projections', () => {
 
   test('the names of the projections are unique', async () => {
     await mysql.withDatabase(async ({ pool }) => {
-      await migrate(pool)
+      await migrate(pool, { eventStore: true })
 
       expect(() => createEventStore(pool, { projections: [occurrences, occurrences] })).toThrow()
     })
@@ -1242,9 +1280,94 @@ describe('Async projections', () => {
     })
   })
 
-  // Open design question: one `version` cannot guard a document fed by many streams. Choose per-stream versions in the
-  // document, replay = rebuild from scratch, or "multi-stream documents are not idempotent", then write this test.
-  test.todo('a multi-stream document is not changed by a replay of the events it already applied')
+  // Every document keeps the version of every stream that fed it, in hermes_projection_versions.
+  test('a multi-stream document is not changed by a replay of the events it already applied', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const checkpoints = () =>
+        count(pool, 'SELECT SUM(`version`) AS n FROM `hermes_subscriptions` WHERE `consumer_name` = ?', [
+          'projection:eventCounter',
+        ])
+
+      onDispose(
+        await createProjectionConsumer({
+          getOptions: () => options,
+          projection: eventCounter,
+          pollInterval: Duration.ofMiliseconds(50),
+        }).start(),
+      )
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a'), note('b')])
+      await eventStore.appendToStream<SchedulingEvent>('task-2', [note('c')])
+      await waitUntil(async () => (await checkpoints()) === 3)
+
+      expect(
+        await select(
+          pool,
+          'SELECT `stream_id`, `version` FROM `hermes_projection_versions` WHERE `name` = ? AND `id` = ? ORDER BY 1',
+          ['eventCounter', 'all'],
+        ),
+      ).toEqual([
+        { stream_id: 'task-1', version: '2' },
+        { stream_id: 'task-2', version: '1' },
+      ])
+
+      await pool.query('UPDATE `hermes_subscriptions` SET `version` = 0 WHERE `consumer_name` = ?', [
+        'projection:eventCounter',
+      ])
+      await waitUntil(async () => (await checkpoints()) === 3)
+
+      // one `version` means nothing for a document fed by many streams
+      expect(await eventStore.readProjection(eventCounter, 'all')).toEqual({ data: { count: 3 }, version: null })
+    })
+  })
+
+  test('an evolve that returns null deletes the document, and a replay does not bring it back', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const openOccurrences = defineHermesProjection<Occurrence | null, SchedulingEvent>()
+        .ofName('openOccurrences')
+        .ofDocumentType()
+        .ofEvents('OccurrenceScheduled', 'OccurrenceBecameDueNow', 'TaskCompleted')
+        .ofInitialState(() => null)
+        .ofEvolve((state, event) =>
+          event.type === 'TaskCompleted' ? null : scheduling.evolve(state ?? scheduling.initialState(), event),
+        )
+        .async()
+        .done()
+      const checkpoint = () =>
+        count(pool, 'SELECT `version` AS n FROM `hermes_subscriptions` WHERE `consumer_name` = ? AND `stream_id` = ?', [
+          'projection:openOccurrences',
+          'task-1',
+        ])
+
+      onDispose(
+        await createProjectionConsumer({
+          getOptions: () => options,
+          projection: openOccurrences,
+          pollInterval: Duration.ofMiliseconds(50),
+        }).start(),
+      )
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', FUTURE)])
+      await waitUntil(async () => (await eventStore.readProjection(openOccurrences, 'task-1')) !== null)
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [completed('o-1')])
+      await waitUntil(async () => (await checkpoint()) === 2)
+
+      expect(await eventStore.readProjection(openOccurrences, 'task-1')).toBeNull()
+      expect(
+        await count(pool, 'SELECT COUNT(*) AS n FROM `hermes_projections` WHERE `name` = ?', ['openOccurrences']),
+      ).toBe(0)
+
+      await pool.query('UPDATE `hermes_subscriptions` SET `version` = 0 WHERE `consumer_name` = ?', [
+        'projection:openOccurrences',
+      ])
+      await waitUntil(async () => (await checkpoint()) === 2)
+
+      expect(await eventStore.readProjection(openOccurrences, 'task-1')).toBeNull()
+    })
+  })
 })
 
 describe('Mutex', () => {
