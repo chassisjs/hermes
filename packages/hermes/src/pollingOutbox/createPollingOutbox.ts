@@ -7,6 +7,18 @@ import { useExponentialRetryPolicy } from './policies.js'
 import { type PollingLane, type PollingOutbox, type PollingOutboxParams } from './types.js'
 
 /**
+ * Wraps a handler of the application, so an error it throws or a promise it rejects does not stop polling or crash
+ * the process.
+ */
+const ignoringErrors =
+  <Args extends unknown[]>(handler: ((...args: Args) => unknown) | undefined) =>
+  (...args: Args): void => {
+    Promise.resolve()
+      .then(() => handler?.(...args))
+      .catch(noop)
+  }
+
+/**
  * Creates an outbox that polls the database for undelivered messages and publishes them.
  *
  * It does not keep a position like "the last published id". Every message keeps its own state (delivered, attempts,
@@ -34,19 +46,6 @@ import { type PollingLane, type PollingOutbox, type PollingOutboxParams } from '
  * await stop()
  * ```
  */
-/**
- * Wraps a handler of the application, so an error it throws does not stop polling or crash the process.
- */
-const ignoringErrors =
-  <Args extends unknown[]>(handler: ((...args: Args) => void) | undefined) =>
-  (...args: Args): void => {
-    try {
-      handler?.(...args)
-    } catch {
-      return
-    }
-  }
-
 const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): PollingOutbox => {
   const { policy, publish } = params
   const pollInterval = params.pollInterval ?? Duration.ofSeconds(1)
@@ -62,9 +61,9 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
   assert(Number.isInteger(batchSize) && batchSize >= 1, '`batchSize` has to be a positive integer.')
   assert(lease.ms > 0, '`lease` has to be longer than 0.')
 
-  const publishLane = async (lane: PollingLane<Message>, stopping: AbortSignal) => {
+  const publishLane = async (lane: PollingLane<Message>, stopping: AbortSignal, hasClaim: () => boolean) => {
     for (const message of lane.messages) {
-      if (stopping.aborted) {
+      if (stopping.aborted || !hasClaim()) {
         return
       }
 
@@ -94,11 +93,23 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
     }
   }
 
-  const publishLanes = async (lanes: PollingLane<Message>[], stopping: AbortSignal) => {
+  /**
+   * Publishes the claimed lanes and renews their claims meanwhile. A lane stops taking new messages when its claim was
+   * not renewed for two thirds of the lease, so it does not go on when another instance may have taken it over. At
+   * the end, it waits for the renewal in progress at most one lease, so a renewal that hangs does not stop the outbox.
+   */
+  const publishLanes = async (lanes: PollingLane<Message>[], stopping: AbortSignal, claimedAt: number) => {
+    let renewedAt = claimedAt
+    const hasClaim = () => Date.now() - renewedAt < lease.ms - Math.floor(lease.ms / 3)
     const renewal = setInterval(
       () => {
+        const startedAt = Date.now()
+
         renewing ??= policy
           .renew({ owner, lease, lanes })
+          .then(() => {
+            renewedAt = Math.max(renewedAt, startedAt)
+          })
           .catch(onDbError)
           .finally(() => {
             renewing = undefined
@@ -108,10 +119,14 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
     )
 
     try {
-      await Promise.all(lanes.map((lane) => publishLane(lane, stopping)))
+      await Promise.all(lanes.map((lane) => publishLane(lane, stopping, hasClaim)))
     } finally {
       clearInterval(renewal)
-      await renewing
+
+      const waiting = new AbortController()
+
+      await Promise.race([renewing, setTimeout(lease.ms, undefined, { signal: waiting.signal }).catch(noop)])
+      waiting.abort()
     }
   }
 
@@ -127,9 +142,10 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
           let hasMore = false
 
           try {
+            const claimedAt = Date.now()
             const lanes = await policy.claim({ owner, lease, limit: batchSize })
 
-            await publishLanes(lanes, stopping.signal)
+            await publishLanes(lanes, stopping.signal, claimedAt)
 
             hasMore = lanes.some(({ messages }) => messages.length >= batchSize)
           } catch (error) {

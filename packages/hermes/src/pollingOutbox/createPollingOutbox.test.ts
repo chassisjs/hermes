@@ -327,7 +327,7 @@ describe('createPollingOutbox with usePartitionOrderingPolicy', () => {
 
     const stop = createPollingOutbox({
       ...fast,
-      lease: Duration.ofMiliseconds(30),
+      lease: Duration.ofMiliseconds(300),
       owner: 'first',
       policy: usePartitionOrderingPolicy({
         ...store,
@@ -342,13 +342,78 @@ describe('createPollingOutbox with usePartitionOrderingPolicy', () => {
           await store.releasePartitions(params)
         },
       }),
-      publish: () => setTimeout(20),
+      publish: () => setTimeout(150),
     }).start()
 
     await waitUntil(() => events.includes('renewal started'))
     await stop()
 
     expect(events.slice(-2)).toEqual(['renewal ended', 'released'])
+  })
+
+  test('stop waits for a renewal that hangs at most one lease', async () => {
+    const { store, add } = createInMemoryStore()
+    let renewals = 0
+
+    add(1)
+
+    const stop = createPollingOutbox({
+      ...fast,
+      lease: Duration.ofMiliseconds(60),
+      owner: 'first',
+      policy: usePartitionOrderingPolicy({
+        ...store,
+        renewPartitions: () => {
+          renewals++
+          return new Promise<void>(() => {})
+        },
+      }),
+      publish: () => setTimeout(40),
+    }).start()
+
+    await waitUntil(() => renewals === 1)
+
+    const startedAt = Date.now()
+
+    await stop()
+
+    expect(Date.now() - startedAt).toBeLessThan(500)
+  })
+
+  test('a lane stops taking messages when its claim was not renewed for two thirds of the lease', async () => {
+    const { store, add } = createInMemoryStore()
+    const claims: number[] = []
+    const lateness: number[] = []
+
+    for (let id = 1; id <= 10; id++) {
+      add(id)
+    }
+
+    const stop = createPollingOutbox({
+      ...fast,
+      lease: Duration.ofMiliseconds(90),
+      owner: 'first',
+      policy: usePartitionOrderingPolicy({
+        ...store,
+        claimPartitions: async (params) => {
+          claims.push(Date.now())
+          return store.claimPartitions(params)
+        },
+        renewPartitions: async () => {
+          throw new Error('renewal failed')
+        },
+      }),
+      publish: async () => {
+        lateness.push(Date.now() - claims[claims.length - 1])
+        await setTimeout(20)
+      },
+    }).start()
+
+    await waitUntil(() => lateness.length === 10)
+    await stop()
+
+    expect(claims.length).toBeGreaterThan(1)
+    expect(Math.max(...lateness)).toBeLessThan(60)
   })
 
   test('stop waits for the message being published and releases the partitions', async () => {
@@ -549,7 +614,7 @@ describe('createPollingOutbox', () => {
         }),
         publish: async (message) => {
           await setTimeout(40)
-          published.push(message.id)
+          published.push(String(message.id))
         },
         onDbError: (error) => {
           throw error
@@ -557,6 +622,44 @@ describe('createPollingOutbox', () => {
       }).start()
 
       await waitUntil(() => published.length === 2)
+      await stop()
+      await setTimeout(20)
+
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
+  test('a rejected promise of an async onDbError is not unhandled', async () => {
+    const { store, add } = createInMemoryStore()
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    let errors = 0
+
+    process.on('unhandledRejection', onUnhandled)
+
+    try {
+      add(1)
+
+      const stop = createPollingOutbox({
+        ...fast,
+        owner: 'first',
+        policy: usePartitionOrderingPolicy({
+          ...store,
+          claimPartitions: async () => {
+            throw new Error('claim failed')
+          },
+        }),
+        publish: async () => {},
+        onDbError: async (error) => {
+          errors++
+          await setTimeout(1)
+          throw error
+        },
+      }).start()
+
+      await waitUntil(() => errors >= 2)
       await stop()
       await setTimeout(20)
 
