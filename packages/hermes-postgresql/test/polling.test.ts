@@ -337,7 +337,11 @@ describe('Async outbox', () => {
         VALUES ('app', 'old', 'Test', '{}'::jsonb)
       `
 
-      await migrate(sql, 'hermes_slot_app_default')
+      await Promise.all([
+        migrate(sql, 'hermes_slot_app_default'),
+        migrate(sql, 'hermes_slot_app_default'),
+        migrate(sql, 'hermes_slot_app_default'),
+      ])
 
       expect(await sql`SELECT "partitionKey" FROM "asyncOutbox"`).toEqual([{ partitionKey: 'default' }])
       expect(

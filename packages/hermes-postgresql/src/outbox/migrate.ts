@@ -1,3 +1,5 @@
+import { Duration } from '@chassisjs/hermes'
+import { setTimeout } from 'node:timers/promises'
 import { Sql } from 'postgres'
 import { PublicationName, type SlotName } from '../common/consts.js'
 import { OutboxConsumerStatuses } from './OutboxConsumerState.js'
@@ -14,6 +16,35 @@ export const dropReplicationSlot = async (sql: Sql, slotName: SlotName) => {
   )
 }
 
+const LockTimeoutAttempts = 12
+const LockNotAvailable = '55P03'
+
+/**
+ * Runs a migration that may wait for a lock of a table, e.g. behind a long transaction of the application. The
+ * migration gives up after `lock_timeout` (5 seconds), so it does not hold up the statements queued behind its lock (all the
+ * inserts of the application, for `ACCESS EXCLUSIVE`), and tries again a moment later.
+ */
+const migrateWithLockTimeout = async (migration: () => Promise<unknown>) => {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await migration()
+
+      return
+    } catch (error) {
+      if ((error as { code?: string }).code !== LockNotAvailable || attempt >= LockTimeoutAttempts) {
+        throw error
+      }
+
+      await setTimeout(Duration.ofSeconds(1).ms)
+    }
+  }
+}
+
+/**
+ * Creates and upgrades the tables of Hermes. Instances that start at the same time upgrade the tables of the
+ * asynchronous outbox one after another (an advisory lock of the current schema), and the upgrade checks the schema
+ * first, so it takes no lock of a table that is up to date.
+ */
 export const migrate = async (sql: Sql, slotName: string) => {
   await sql`
     DO $$
@@ -67,52 +98,6 @@ export const migrate = async (sql: Sql, slotName: string) => {
   `
 
   await sql`
-    DO $$
-    BEGIN
-      IF to_regclass('"asyncOutboxDeliveredIdx"') IS NULL THEN
-        CREATE INDEX "asyncOutboxDeliveredIdx" ON "asyncOutbox" ("delivered" ASC);
-      END IF;
-
-      IF to_regclass('"asyncOutboxDeliveredWithDateIdx"') IS NULL THEN
-        CREATE INDEX "asyncOutboxDeliveredWithDateIdx" ON "asyncOutbox" ("delivered" ASC, "addedAt" ASC);
-      END IF;
-
-      IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema() AND table_name = 'asyncOutbox' AND column_name = 'partitionKey'
-      ) THEN
-        ALTER TABLE "asyncOutbox"
-          ADD COLUMN "partitionKey"   VARCHAR(250)  DEFAULT 'default' NOT NULL,
-          ADD COLUMN "nextAttemptAt"  TIMESTAMPTZ   NULL,
-          ADD COLUMN "claimedBy"      VARCHAR(250)  NULL,
-          ADD COLUMN "claimedUntil"   TIMESTAMPTZ   NULL;
-      ELSIF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema() AND table_name = 'asyncOutbox' AND column_name = 'partitionKey'
-          AND (character_maximum_length < 250 OR is_nullable = 'YES' OR column_default IS NULL)
-      ) THEN
-        UPDATE "asyncOutbox" SET "partitionKey" = 'default' WHERE "partitionKey" IS NULL;
-        ALTER TABLE "asyncOutbox"
-          ALTER COLUMN "partitionKey" TYPE VARCHAR(250),
-          ALTER COLUMN "partitionKey" SET DEFAULT 'default',
-          ALTER COLUMN "partitionKey" SET NOT NULL;
-      END IF;
-
-      IF to_regclass('"asyncOutboxPendingIdx"') IS NULL THEN
-        CREATE INDEX "asyncOutboxPendingIdx" ON "asyncOutbox" ("consumerName", "partitionKey", "position")
-        WHERE "delivered" = false;
-      END IF;
-
-      IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema() AND table_name = 'asyncOutboxPartition' AND column_name = 'partitionKey'
-          AND character_maximum_length < 250
-      ) THEN
-        ALTER TABLE "asyncOutboxPartition" ALTER COLUMN "partitionKey" TYPE VARCHAR(250);
-      END IF;
-    END $$;
-  `
-  await sql`
     CREATE TABLE IF NOT EXISTS "asyncOutboxPartition" (
       "consumerName"  VARCHAR(30)   NOT NULL,
       "partitionKey"  VARCHAR(250)  NOT NULL,
@@ -136,7 +121,62 @@ export const migrate = async (sql: Sql, slotName: string) => {
     );
   `
 
-  await sql`CREATE UNIQUE INDEX IF NOT EXISTS "consumerNameIdx" ON "outboxConsumer" ("consumerName" DESC, "partitionKey");`
+  await migrateWithLockTimeout(
+    () => sql`
+      DO $$
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('hermes.migrate.' || current_schema()));
+        PERFORM set_config('lock_timeout', '5s', true);
+
+        IF to_regclass(format('%I.%I', current_schema(), 'asyncOutboxDeliveredIdx')) IS NULL THEN
+          CREATE INDEX IF NOT EXISTS "asyncOutboxDeliveredIdx" ON "asyncOutbox" ("delivered" ASC);
+        END IF;
+
+        IF to_regclass(format('%I.%I', current_schema(), 'asyncOutboxDeliveredWithDateIdx')) IS NULL THEN
+          CREATE INDEX IF NOT EXISTS "asyncOutboxDeliveredWithDateIdx" ON "asyncOutbox" ("delivered" ASC, "addedAt" ASC);
+        END IF;
+
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'asyncOutbox' AND column_name = 'partitionKey'
+        ) THEN
+          ALTER TABLE "asyncOutbox"
+            ADD COLUMN IF NOT EXISTS "partitionKey"   VARCHAR(250)  DEFAULT 'default' NOT NULL,
+            ADD COLUMN IF NOT EXISTS "nextAttemptAt"  TIMESTAMPTZ   NULL,
+            ADD COLUMN IF NOT EXISTS "claimedBy"      VARCHAR(250)  NULL,
+            ADD COLUMN IF NOT EXISTS "claimedUntil"   TIMESTAMPTZ   NULL;
+        ELSIF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'asyncOutbox' AND column_name = 'partitionKey'
+            AND (character_maximum_length < 250 OR is_nullable = 'YES' OR column_default IS NULL)
+        ) THEN
+          LOCK TABLE "asyncOutbox" IN ACCESS EXCLUSIVE MODE;
+          UPDATE "asyncOutbox" SET "partitionKey" = 'default' WHERE "partitionKey" IS NULL;
+          ALTER TABLE "asyncOutbox"
+            ALTER COLUMN "partitionKey" TYPE VARCHAR(250),
+            ALTER COLUMN "partitionKey" SET DEFAULT 'default',
+            ALTER COLUMN "partitionKey" SET NOT NULL;
+        END IF;
+
+        IF to_regclass(format('%I.%I', current_schema(), 'asyncOutboxPendingIdx')) IS NULL THEN
+          CREATE INDEX IF NOT EXISTS "asyncOutboxPendingIdx" ON "asyncOutbox" ("consumerName", "partitionKey", "position")
+          WHERE "delivered" = false;
+        END IF;
+
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'asyncOutboxPartition' AND column_name = 'partitionKey'
+            AND character_maximum_length < 250
+        ) THEN
+          ALTER TABLE "asyncOutboxPartition" ALTER COLUMN "partitionKey" TYPE VARCHAR(250);
+        END IF;
+
+        IF to_regclass(format('%I.%I', current_schema(), 'consumerNameIdx')) IS NULL THEN
+          CREATE UNIQUE INDEX IF NOT EXISTS "consumerNameIdx" ON "outboxConsumer" ("consumerName" DESC, "partitionKey");
+        END IF;
+      END $$;
+    `,
+  )
 
   await sql.unsafe(`
     DO $$

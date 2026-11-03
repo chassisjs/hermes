@@ -38,6 +38,9 @@ type PollingStoreScope = {
  * message itself is not claimed (`usePartitionOrderingPolicy`). It locks the partition (`FOR SHARE`), so it waits for
  * an instance that is claiming it and then sees the new owner.
  *
+ * `markDelivered` does not check the claim on purpose: the message is already published, so it is delivered whoever
+ * published it. Checking the claim would only leave a published message undelivered, to be published again.
+ *
  * @param getSql - Returns the connection to the database
  * @param scope - The consumer and, optionally, the partition whose messages the store reads
  */
