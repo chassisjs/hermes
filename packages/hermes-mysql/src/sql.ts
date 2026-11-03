@@ -10,7 +10,7 @@ const MaxRowsPerStatement = 1000
 const DefaultPollingConnectionLimit = 3
 const PollingProgramName = 'hermes-polling'
 const LockWaitTimeoutSeconds = 5
-const LockWaitTimeoutErrno = 1205
+const RetriedErrnos = [1205, 1213]
 
 /**
  * Creates the pool that Hermes polls the outbox with.
@@ -97,14 +97,15 @@ const inTransaction = async <T>(
 
 /**
  * Runs a short statement that changes rows by their primary key again when it waited too long for a lock of a row
- * (`ER_LOCK_WAIT_TIMEOUT`), e.g. because a transaction of the application locked it for a moment.
+ * (`ER_LOCK_WAIT_TIMEOUT`), e.g. because a transaction of the application locked it for a moment, or was chosen as
+ * the victim of a deadlock (`ER_LOCK_DEADLOCK`).
  */
 const retryOnLockWaitTimeout = async <T>(statement: () => Promise<T>, attempts = 3): Promise<T> => {
   for (let attempt = 1; ; attempt++) {
     try {
       return await statement()
     } catch (error) {
-      if ((error as { errno?: number }).errno !== LockWaitTimeoutErrno || attempt >= attempts) {
+      if (!RetriedErrnos.includes((error as { errno?: number }).errno ?? 0) || attempt >= attempts) {
         throw error
       }
     }

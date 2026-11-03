@@ -116,6 +116,25 @@ describe('Migrations', () => {
     })
   })
 
+  test('migrate on a polling pool keeps the short table lock timeout of the pool', async () => {
+    await mysql.withDatabase(async ({ options }) => {
+      const pollingPool = createPollingPool(options, 1)
+
+      try {
+        await migrate(pollingPool)
+
+        const [{ timeout }] = await select<{ timeout: string }>(
+          pollingPool,
+          'SELECT @@SESSION.lock_wait_timeout AS `timeout`',
+        )
+
+        expect(Number(timeout)).toBe(5)
+      } finally {
+        await pollingPool.end()
+      }
+    })
+  })
+
   test('start() does not migrate when `migrate` is false', async () => {
     await mysql.withDatabase(async ({ options, pool }) => {
       const stop = await createConsumer(options, () => {}, { migrate: false }).start()

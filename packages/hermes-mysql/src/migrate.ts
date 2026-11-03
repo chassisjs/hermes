@@ -61,7 +61,9 @@ const migrations: Migration[] = [
  * keeps the versions that were applied.
  *
  * Many instances of the application can run it at the same time: they wait for each other on a named lock
- * (`GET_LOCK`) of the database, and every migration runs once.
+ * (`GET_LOCK`) of the database, and every migration runs once. It waits for the locks of the tables as long as the
+ * server allows (the global `lock_wait_timeout`), also on a connection of `createPollingPool`, which waits only
+ * 5 seconds, and then sets the timeout of the connection back.
  *
  * `createOutboxConsumer` runs it on `start()`. Call it yourself when you turn that off (`migrate: false`), e.g. in a
  * deployment pipeline with a user that can change the schema.
@@ -75,7 +77,13 @@ const migrate = async (pool: Pool, options?: { lockTimeout?: Duration }): Promis
   const connection = await pool.getConnection()
   const lockName = `CONCAT('hermes_migrations.', DATABASE())`
 
+  const [[{ sessionLockWaitTimeout }]] = await connection.query<RowDataPacket[]>(
+    'SELECT @@SESSION.lock_wait_timeout AS sessionLockWaitTimeout',
+  )
+
   try {
+    await connection.query('SET SESSION lock_wait_timeout = @@GLOBAL.lock_wait_timeout')
+
     const [[{ locked }]] = await connection.query<RowDataPacket[]>(`SELECT GET_LOCK(${lockName}, ?) AS locked`, [
       Math.ceil(lockTimeout.ms / 1000),
     ])
@@ -114,7 +122,12 @@ const migrate = async (pool: Pool, options?: { lockTimeout?: Duration }): Promis
       await connection.query(`SELECT RELEASE_LOCK(${lockName})`)
     }
   } finally {
-    connection.release()
+    try {
+      await connection.query('SET SESSION lock_wait_timeout = ?', [Number(sessionLockWaitTimeout)])
+      connection.release()
+    } catch {
+      connection.destroy()
+    }
   }
 }
 
