@@ -1,0 +1,279 @@
+import {
+  assert,
+  assertExpectedVersion,
+  type Event,
+  type EventStore,
+  type HermesProjection,
+  type RecordedEvent,
+  type StateLoader,
+} from '@chassisjs/hermes'
+import { randomUUID } from 'node:crypto'
+import { type Pool, type RowDataPacket } from 'mysql2/promise'
+import { DeadlockErrno, DuplicateEntryErrno, EventsTable, StreamsTable } from './eventStoreSql.js'
+import { applyToProjection, readDocument, toBigInt, type AnyProjection, type Queryable } from './projections.js'
+import { inTransaction, insertStatements } from './sql.js'
+
+/**
+ * A transaction of the application that an append or a read runs in: a `mysql2` connection with an open transaction.
+ */
+type EventStoreTransaction = Queryable
+
+type MySqlEventStore = EventStore<EventStoreTransaction> & {
+  /**
+   * Reads a document of a projection.
+   *
+   * @returns The document and, for a single-stream projection, the version of its stream (`null` for a document fed by
+   * many streams); `null` when there is no document
+   */
+  readProjection<State, E extends Event>(
+    projection: HermesProjection<State, E>,
+    id: string,
+    options?: { tx?: EventStoreTransaction },
+  ): Promise<{ data: State; version: bigint | null } | null>
+
+  /** The version of a stream, 0 when it does not exist. */
+  readStreamVersion(streamId: string, options?: { tx?: EventStoreTransaction }): Promise<bigint>
+}
+
+type EventRow = RowDataPacket & {
+  stream_id: string
+  stream_position: string | number
+  event_id: string
+  type: string
+  data: unknown
+  metadata: unknown
+  recorded_at: Date
+}
+
+const OwnTransactionAttempts = 5
+const Savepoint = 'hermes_append'
+
+const errnoOf = (error: unknown) => (error as { errno?: number }).errno
+
+const toRecordedEvent = (row: EventRow) =>
+  ({
+    type: row.type,
+    data: row.data,
+    metadata: row.metadata ?? {},
+    streamId: row.stream_id,
+    streamPosition: toBigInt(row.stream_position),
+    eventId: row.event_id,
+    recordedAt: row.recorded_at,
+  }) as RecordedEvent
+
+/**
+ * Locks the row of a stream until the end of the transaction and returns its version, creating the row (at version 0)
+ * when the stream does not exist.
+ *
+ * It looks for the row with a plain `SELECT` first, so that a missing stream is created with an `INSERT`, which locks
+ * only the new row, instead of a locking read of a missing row, which in `REPEATABLE READ` locks the gap where other
+ * streams would be created.
+ */
+const lockStream = async (ex: Queryable, streamId: string) => {
+  const [found] = await ex.query<RowDataPacket[]>(`SELECT 1 FROM \`${StreamsTable}\` WHERE \`stream_id\` = ?`, [
+    streamId,
+  ])
+
+  if (!found.length) {
+    try {
+      await ex.query(`INSERT INTO \`${StreamsTable}\` (\`stream_id\`, \`version\`) VALUES (?, 0)`, [streamId])
+
+      return 0n
+    } catch (error) {
+      if (errnoOf(error) !== DuplicateEntryErrno) {
+        throw error
+      }
+    }
+  }
+
+  const [[row]] = await ex.query<RowDataPacket[]>(
+    `SELECT \`version\` FROM \`${StreamsTable}\` WHERE \`stream_id\` = ? FOR UPDATE`,
+    [streamId],
+  )
+
+  return toBigInt(row.version)
+}
+
+/**
+ * Creates an event store on MySQL 8.0+ / Aurora MySQL 3. Run `migrate(pool, { eventStore: true })` first.
+ *
+ * An append locks the row of its stream in `hermes_streams` until the end of its transaction, checks the expected
+ * version, stores the events with the next positions and updates the inline projections, all in one transaction:
+ * its own, in `READ COMMITTED`, or the one of the application (`tx`). In the transaction of the application, the
+ * append runs inside a savepoint, so a rejected append (e.g. a {@link VersionConflictError}) leaves nothing behind
+ * and the transaction stays usable. Appends to different streams do not wait for each other.
+ *
+ * Its own transaction is tried again when MySQL picks it as the victim of a deadlock (e.g. when many instances create
+ * the same stream at once). A deadlock in the transaction of the application rolls back the whole transaction, so it
+ * is thrown to the application as it is.
+ *
+ * Reads and appends use the pool, so point it at the writer of Aurora, not at a reader: the readers lag behind.
+ *
+ * @param pool - The `mysql2` pool of the application
+ * @param options.projections - The inline projections, updated in the transaction of every append
+ */
+const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] }): MySqlEventStore => {
+  const projections = options?.projections ?? []
+  const names = projections.map(({ name }) => name)
+
+  assert(new Set(names).size === names.length, 'The names of the projections have to be unique.')
+
+  const inline = projections.filter(({ mode }) => mode === 'inline')
+
+  const append = async (
+    ex: Queryable,
+    streamId: string,
+    events: Event[],
+    expectedVersion: Parameters<typeof assertExpectedVersion>[1],
+  ) => {
+    await ex.query(`SAVEPOINT ${Savepoint}`)
+
+    try {
+      const currentVersion = await lockStream(ex, streamId)
+
+      assertExpectedVersion(streamId, expectedVersion, currentVersion)
+
+      const recordedAt = new Date()
+      const recorded = events.map(
+        (event, i) =>
+          ({
+            type: event.type,
+            data: event.data,
+            metadata: (event as { metadata?: unknown }).metadata ?? {},
+            streamId,
+            streamPosition: currentVersion + BigInt(i + 1),
+            eventId: randomUUID(),
+            recordedAt,
+          }) as RecordedEvent,
+      )
+      const nextVersion = currentVersion + BigInt(events.length)
+
+      for (const { text, params } of insertStatements(
+        EventsTable,
+        [
+          { name: 'stream_id' },
+          { name: 'stream_position' },
+          { name: 'event_id' },
+          { name: 'type' },
+          { name: 'data', placeholder: 'CAST(? AS JSON)' },
+          { name: 'metadata', placeholder: 'CAST(? AS JSON)' },
+          { name: 'recorded_at' },
+        ],
+        recorded.map((event) => [
+          streamId,
+          event.streamPosition.toString(),
+          event.eventId,
+          event.type,
+          JSON.stringify(event.data),
+          JSON.stringify(event.metadata),
+          recordedAt,
+        ]),
+      )) {
+        await ex.query(text, params)
+      }
+
+      await ex.query(`UPDATE \`${StreamsTable}\` SET \`version\` = ? WHERE \`stream_id\` = ?`, [
+        nextVersion.toString(),
+        streamId,
+      ])
+
+      for (const projection of inline) {
+        await applyToProjection(ex, projection, recorded)
+      }
+
+      await ex.query(`RELEASE SAVEPOINT ${Savepoint}`)
+
+      return { nextVersion, createdNewStream: currentVersion === 0n }
+    } catch (error) {
+      if (errnoOf(error) !== DeadlockErrno) {
+        await ex.query(`ROLLBACK TO SAVEPOINT ${Savepoint}`).catch(() => {})
+      }
+
+      throw error
+    }
+  }
+
+  const readStreamVersion = async (streamId: string, ex: Queryable) => {
+    const [rows] = await ex.query<RowDataPacket[]>(
+      `SELECT \`version\` FROM \`${StreamsTable}\` WHERE \`stream_id\` = ?`,
+      [streamId],
+    )
+
+    return rows.length ? toBigInt(rows[0].version) : 0n
+  }
+
+  return {
+    async readStream<E extends Event>(streamId: string, options?: { after?: bigint; tx?: EventStoreTransaction }) {
+      const ex = options?.tx ?? pool
+      const currentVersion = await readStreamVersion(streamId, ex)
+      const [rows] = await ex.query<EventRow[]>(
+        `SELECT \`stream_id\`, \`stream_position\`, \`event_id\`, \`type\`, \`data\`, \`metadata\`, \`recorded_at\`
+         FROM \`${EventsTable}\`
+         WHERE \`stream_id\` = ? AND \`stream_position\` > ?
+         ORDER BY \`stream_position\``,
+        [streamId, (options?.after ?? 0n).toString()],
+      )
+
+      return {
+        events: rows.map(toRecordedEvent) as RecordedEvent<E>[],
+        currentVersion,
+        streamExists: currentVersion > 0n,
+      }
+    },
+
+    async appendToStream(streamId, events, options) {
+      assert(events.length > 0, 'There are no events to append.')
+      assert(
+        typeof streamId === 'string' && streamId.length > 0 && streamId.length <= 250,
+        'A stream id has to have 1 to 250 characters.',
+      )
+
+      const expectedVersion = options?.expectedVersion ?? 'any'
+
+      if (options?.tx) {
+        return append(options.tx, streamId, events, expectedVersion)
+      }
+
+      for (let attempt = 1; ; attempt++) {
+        try {
+          return await inTransaction(pool, (connection) => append(connection, streamId, events, expectedVersion), {
+            readCommitted: true,
+          })
+        } catch (error) {
+          if (errnoOf(error) !== DeadlockErrno || attempt >= OwnTransactionAttempts) {
+            throw error
+          }
+        }
+      }
+    },
+
+    readProjection: (projection, id, options) =>
+      readDocument(options?.tx ?? pool, projection as HermesProjection<never, Event>, id) as never,
+
+    readStreamVersion: (streamId, options) => readStreamVersion(streamId, options?.tx ?? pool),
+  }
+}
+
+/**
+ * Loads the state of a stream from the document of a single-stream inline projection (state-stored), with the
+ * version of the stream it was updated at. A stream without a document has the initial state.
+ *
+ * The projection has to apply the same events as the `evolve` of the decider, e.g. `.ofEvolve(decider.evolve)`.
+ */
+const fromInlineProjection = <State, E extends Event>(
+  eventStore: MySqlEventStore,
+  projection: HermesProjection<State, E>,
+): StateLoader<State, EventStoreTransaction> => {
+  assert(projection.isSingleStream, `Projection ${projection.name} has to have one document per stream (no ofId).`)
+  assert(projection.mode === 'inline', `Projection ${projection.name} has to be inline.`)
+
+  return async ({ streamId, tx }) => {
+    const document = await eventStore.readProjection(projection, streamId, { tx })
+
+    return document
+      ? { state: document.data, version: document.version ?? 0n }
+      : { state: projection.initialState(), version: await eventStore.readStreamVersion(streamId, { tx }) }
+  }
+}
+
+export { createEventStore, fromInlineProjection, type EventStoreTransaction, type MySqlEventStore }

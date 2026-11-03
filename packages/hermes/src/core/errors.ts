@@ -1,6 +1,7 @@
 enum HermesErrorCode {
   Assertion = 'Assertion',
   NotSupportedMongoVersion = 'NotSupportedMongoVersion',
+  VersionConflict = 'VersionConflict',
 }
 type HermesErrorDetails<T extends Record<string, unknown> = Record<string, never>> = {
   [K in keyof T]: T[K]
@@ -37,4 +38,35 @@ class NotSupportedMongoVersionError extends HermesError<{ supportedVersions: num
   }
 }
 
-export { AssertionError, HermesError, HermesErrorCode, NotSupportedMongoVersionError }
+type VersionConflictDetails = {
+  /** The stream that was appended to. */
+  streamId: string
+  /** The version the caller expected. */
+  expectedVersion: bigint | 'no_stream' | 'stream_exists' | 'any'
+  /** The version of the stream when the append was rejected (0 when the stream does not exist). */
+  currentVersion: bigint
+}
+
+/**
+ * An append was rejected because the stream is not at the version the caller expected, e.g. because another instance
+ * appended first. Nothing of the rejected append is stored.
+ */
+class VersionConflictError extends HermesError<VersionConflictDetails> {
+  constructor(public details: HermesErrorDetails<VersionConflictDetails>) {
+    super(
+      HermesErrorCode.VersionConflict,
+      details,
+      `Stream ${details.streamId} is at version ${details.currentVersion}, expected ${String(details.expectedVersion)}.`,
+    )
+    this.name = 'VersionConflictError'
+  }
+}
+
+export {
+  AssertionError,
+  HermesError,
+  HermesErrorCode,
+  NotSupportedMongoVersionError,
+  VersionConflictError,
+  type VersionConflictDetails,
+}

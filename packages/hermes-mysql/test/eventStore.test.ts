@@ -60,8 +60,9 @@ const select = async <T>(pool: Pool, sql: string, params: unknown[] = []) => {
   return rows as T[]
 }
 
+/** The number in the column `n` of the first row, 0 when there is no row (e.g. a checkpoint not created yet). */
 const count = async (pool: Pool, sql: string, params: unknown[] = []) =>
-  Number((await select<{ n: string | number }>(pool, sql, params))[0].n)
+  Number((await select<{ n: string | number }>(pool, sql, params))[0]?.n ?? 0)
 
 const withTransaction = async <T>(pool: Pool, fn: (tx: PoolConnection) => Promise<T>) => {
   const connection = await pool.getConnection()

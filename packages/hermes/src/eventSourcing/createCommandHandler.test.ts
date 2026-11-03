@@ -306,7 +306,10 @@ describe('createCommandHandler', () => {
         decider: scheduling,
         eventStore,
         // the stored state is one event behind the stream
-        loadState: async () => ({ state: { status: 'scheduled', occurrenceId: 'o-1', dueAt: PAST }, version: 1n }),
+        loadState: async () => ({
+          state: { status: 'scheduled' as const, occurrenceId: 'o-1', dueAt: PAST },
+          version: 1n,
+        }),
       })
 
       await expect(handle('task-1', tick(NOW))).rejects.toBeInstanceOf(VersionConflictError)

@@ -1,6 +1,7 @@
 import { Duration } from '@chassisjs/hermes'
 import { setTimeout } from 'node:timers/promises'
-import { type Pool, type RowDataPacket } from 'mysql2/promise'
+import { type Pool, type PoolConnection, type RowDataPacket } from 'mysql2/promise'
+import { EventStoreMigrationTable, eventStoreMigrations } from './eventStoreSql.js'
 import { MigrationTable, OutboxTable, PartitionTable } from './sql.js'
 
 /**
@@ -76,6 +77,42 @@ const retryOnTableLockTimeout = async <T>(statement: () => Promise<T>): Promise<
 }
 
 /**
+ * Applies the pending migrations of one track, recorded in `table`.
+ *
+ * @returns The versions it applied
+ */
+const applyMigrations = async (connection: PoolConnection, table: string, track: Migration[]) => {
+  await retryOnTableLockTimeout(() =>
+    connection.query(`
+      CREATE TABLE IF NOT EXISTS \`${table}\` (
+        \`version\`     INT           NOT NULL,
+        \`name\`        VARCHAR(250)  NOT NULL,
+        \`applied_at\`  DATETIME(6)   NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+        PRIMARY KEY (\`version\`)
+      ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4
+    `),
+  )
+
+  const [rows] = await retryOnTableLockTimeout(() =>
+    connection.query<RowDataPacket[]>(`SELECT \`version\` FROM \`${table}\``),
+  )
+  const applied = new Set(rows.map(({ version }) => Number(version)))
+  const pending = track.filter(({ version }) => !applied.has(version))
+
+  for (const { version, name, statements } of pending) {
+    for (const statement of statements) {
+      await retryOnTableLockTimeout(() => connection.query(statement))
+    }
+
+    await retryOnTableLockTimeout(() =>
+      connection.query(`INSERT INTO \`${table}\` (\`version\`, \`name\`) VALUES (?, ?)`, [version, name]),
+    )
+  }
+
+  return pending.map(({ version }) => version)
+}
+
+/**
  * Creates or updates the Hermes tables: `hermes_outbox`, `hermes_outbox_partition` and `hermes_migrations`, which
  * keeps the versions that were applied.
  *
@@ -89,10 +126,17 @@ const retryOnTableLockTimeout = async <T>(statement: () => Promise<T>): Promise<
  * deployment pipeline with a user that can change the schema.
  *
  * @param pool - A `mysql2` pool
+ * With `eventStore`, it also creates the tables of the event store (`hermes_streams`, `hermes_events`,
+ * `hermes_subscriptions`, `hermes_projections`, `hermes_projection_versions`), whose versions are kept apart in
+ * `hermes_event_store_migrations`. The event store is opt-in, so an application that uses only the outbox does not
+ * get its tables.
+ *
+ * @param pool - A `mysql2` pool
  * @param options.lockTimeout - How long to wait for other instances that are migrating (default: 10 minutes)
- * @returns The versions that this call applied
+ * @param options.eventStore - Whether to create or update the tables of the event store too (default: `false`)
+ * @returns The versions of the outbox that this call applied
  */
-const migrate = async (pool: Pool, options?: { lockTimeout?: Duration }): Promise<number[]> => {
+const migrate = async (pool: Pool, options?: { lockTimeout?: Duration; eventStore?: boolean }): Promise<number[]> => {
   const lockTimeout = options?.lockTimeout ?? Duration.ofMinutes(10)
   const connection = await pool.getConnection()
   const lockName = `CONCAT('hermes_migrations.', DATABASE())`
@@ -114,34 +158,13 @@ const migrate = async (pool: Pool, options?: { lockTimeout?: Duration }): Promis
     }
 
     try {
-      await retryOnTableLockTimeout(() =>
-        connection.query(`
-        CREATE TABLE IF NOT EXISTS \`${MigrationTable}\` (
-          \`version\`     INT           NOT NULL,
-          \`name\`        VARCHAR(250)  NOT NULL,
-          \`applied_at\`  DATETIME(6)   NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-          PRIMARY KEY (\`version\`)
-        ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4
-      `),
-      )
+      const applied = await applyMigrations(connection, MigrationTable, migrations)
 
-      const [rows] = await retryOnTableLockTimeout(() =>
-        connection.query<RowDataPacket[]>(`SELECT \`version\` FROM \`${MigrationTable}\``),
-      )
-      const applied = new Set(rows.map(({ version }) => Number(version)))
-      const pending = migrations.filter(({ version }) => !applied.has(version))
-
-      for (const { version, name, statements } of pending) {
-        for (const statement of statements) {
-          await retryOnTableLockTimeout(() => connection.query(statement))
-        }
-
-        await retryOnTableLockTimeout(() =>
-          connection.query(`INSERT INTO \`${MigrationTable}\` (\`version\`, \`name\`) VALUES (?, ?)`, [version, name]),
-        )
+      if (options?.eventStore) {
+        await applyMigrations(connection, EventStoreMigrationTable, eventStoreMigrations)
       }
 
-      return pending.map(({ version }) => version)
+      return applied
     } finally {
       await connection.query(`SELECT RELEASE_LOCK(${lockName})`)
     }

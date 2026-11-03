@@ -13,3 +13,24 @@ export type {
   QueryExecutor,
   Stop,
 } from './types.js'
+export {
+  createEventStore,
+  fromInlineProjection,
+  type EventStoreTransaction,
+  type MySqlEventStore,
+} from './createEventStore.js'
+export {
+  createEventStoreConsumer,
+  createProjectionConsumer,
+  type EventStoreConsumer,
+  type EventStoreConsumerParams,
+  type HermesEventEnvelope,
+  type ProjectionConsumerParams,
+} from './createEventStoreConsumer.js'
+export {
+  createEventStorePollingStore,
+  type EventStorePollingStore,
+  type EventStorePollingStoreScope,
+} from './createEventStorePollingStore.js'
+export { createMutex, type Mutex } from './createMutex.js'
+export { changedStreamsQuery } from './eventStoreSql.js'

@@ -1,5 +1,12 @@
 export { CancellationPromise } from './CancellablePromise.js'
-export { AssertionError, HermesError, HermesErrorCode, NotSupportedMongoVersionError } from './core/errors.js'
+export {
+  AssertionError,
+  HermesError,
+  HermesErrorCode,
+  NotSupportedMongoVersionError,
+  VersionConflictError,
+  type VersionConflictDetails,
+} from './core/errors.js'
 export {
   assertDate,
   assertNever,
@@ -23,6 +30,29 @@ export {
   type WithoutFlavour,
 } from './core/typing/index.js'
 export { Duration } from './duration.js'
+export {
+  applyProjection,
+  assertExpectedVersion,
+  createCommandHandler,
+  createInMemoryEventStore,
+  defineHermesProjection,
+  type AppendOptions,
+  type AppendResult,
+  type CommandHandler,
+  type CommandHandlerParams,
+  type CommandHandlerResult,
+  type CommandHandlerRetry,
+  type Decider,
+  type EventStore,
+  type ExpectedVersion,
+  type HermesProjection,
+  type HandleOptions,
+  type ProjectionMode,
+  type ReadStreamOptions,
+  type ReadStreamResult,
+  type RecordedEvent,
+  type StateLoader,
+} from './eventSourcing/index.js'
 export {
   createPollingOutbox,
   useExponentialRetryPolicy,
