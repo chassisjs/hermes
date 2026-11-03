@@ -2,7 +2,7 @@ import { Duration } from '@chassisjs/hermes'
 import { describe, expect, jest, test } from '@jest/globals'
 import { StartedPostgreSqlContainer } from '@testcontainers/postgresql'
 import { setTimeout } from 'node:timers/promises'
-import { Sql } from 'postgres'
+import { type ReservedSql, Sql } from 'postgres'
 import {
   createAsyncOutboxConsumer,
   createOutboxConsumer,
@@ -322,6 +322,62 @@ describe('Async outbox', () => {
         { partitionKey: 'default' },
         { partitionKey: 'default' },
       ])
+    })
+  })
+
+  test('instances that start at the same time on an empty database all migrate it', async () => {
+    await postgres(async (sql) => {
+      await Promise.all([
+        migrate(sql, 'hermes_slot_app_default'),
+        migrate(sql, 'hermes_slot_app_default'),
+        migrate(sql, 'hermes_slot_app_default'),
+      ])
+
+      expect(
+        await sql`
+          SELECT i.indisvalid AS "isValid" FROM pg_index i
+          JOIN pg_class c ON c.oid = i.indexrelid
+          WHERE c.relname = 'asyncOutboxPendingIdx'
+        `,
+      ).toEqual([{ isValid: true }])
+    })
+  })
+
+  test('the repair gives up the lock of the table behind a long transaction and tries again', async () => {
+    await postgres(async (sql) => {
+      const insert = (messageId: string, executor: Sql | ReservedSql = sql) => executor`
+        INSERT INTO "asyncOutbox" ("consumerName", "messageId", "messageType", "data")
+        VALUES ('app', ${messageId}, 'Test', '{}'::jsonb)
+      `
+
+      await migrate(sql, 'hermes_slot_app_default')
+      await sql`ALTER TABLE "asyncOutbox" ALTER COLUMN "partitionKey" DROP NOT NULL`
+
+      const tx = await sql.reserve()
+
+      await tx`BEGIN`
+      await insert('long-transaction', tx)
+
+      const migrating = migrate(sql, 'hermes_slot_app_default')
+
+      await setTimeout(1500)
+
+      const startedAt = Date.now()
+
+      await insert('during-migration')
+
+      expect(Date.now() - startedAt).toBeLessThan(Duration.ofSeconds(1).ms)
+
+      await tx`COMMIT`
+      tx.release()
+      await migrating
+
+      expect(
+        await sql`
+          SELECT is_nullable FROM information_schema.columns
+          WHERE table_name = 'asyncOutbox' AND column_name = 'partitionKey'
+        `,
+      ).toEqual([{ is_nullable: 'NO' }])
     })
   })
 
