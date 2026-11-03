@@ -11,6 +11,7 @@ import {
   type HermesEventEnvelope,
   migrate,
 } from '../src/index.js'
+import { changedStreamsQuery } from '../src/eventStoreSql.js'
 import { createMySql } from './mysql.js'
 import {
   complete,
@@ -393,6 +394,36 @@ describe('Optimistic concurrency', () => {
 
       expect((await eventStore.readStream('task-1')).currentVersion).toBe(1n)
       expect((await eventStore.readStream('task-2')).currentVersion).toBe(2n)
+    })
+  })
+
+  test('a conflict leaves the transaction of the application usable, with nothing of the rejected append', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      const eventStore = await setUp(pool)
+      await eventStore.appendToStream<SchedulingEvent>('task-2', [scheduled('o-2', FUTURE)])
+
+      await withTransaction(pool, async (tx) => {
+        await eventStore.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', FUTURE)], { tx })
+        await expect(
+          eventStore.appendToStream<SchedulingEvent>('task-2', [completed('o-2'), note('x')], {
+            tx,
+            expectedVersion: 0n,
+          }),
+        ).rejects.toBeInstanceOf(VersionConflictError)
+        // the application handles the conflict and commits the rest
+      })
+
+      expect((await eventStore.readStream('task-1')).currentVersion).toBe(1n)
+      expect(await eventStore.readProjection(occurrences, 'task-1')).toMatchObject({ version: 1n })
+      expect(await eventStore.readStream('task-2')).toMatchObject({ currentVersion: 1n })
+      expect(await count(pool, 'SELECT COUNT(*) AS n FROM `hermes_events` WHERE `stream_id` = ?', ['task-2'])).toBe(1)
+      expect(await select(pool, 'SELECT `version` FROM `hermes_streams` WHERE `stream_id` = ?', ['task-2'])).toEqual([
+        { version: '1' },
+      ])
+      expect(await eventStore.readProjection(occurrences, 'task-2')).toMatchObject({
+        data: { status: 'scheduled' },
+        version: 1n,
+      })
     })
   })
 
@@ -811,10 +842,14 @@ describe('Event store consumer', () => {
       const published: HermesEventEnvelope<SchedulingEvent>[] = []
 
       await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a'), note('b')])
-      // A claim of an instance that died: nobody renews it.
+      // A claim of an instance that died: nobody renews it. A live instance renews its claims while it publishes and
+      // stop() releases them, so only a hand-made claim makes an instance "die".
+      //
+      // Schema decision pinned here: unlike the outbox (hermes_outbox_partition), the claim lives in the same row as
+      // the checkpoint, one row of hermes_subscriptions per (consumer, stream).
       await pool.query(
         'INSERT INTO `hermes_subscriptions` (`consumer_name`, `stream_id`, `version`, `owner`, `lease_until`) ' +
-          'VALUES (?, ?, 0, ?, NOW(6) + INTERVAL 1 SECOND)',
+          'VALUES (?, ?, 0, ?, NOW(6) + INTERVAL 3 SECOND)',
         ['relay', 'task-1', 'dead-instance'],
       )
 
@@ -827,8 +862,16 @@ describe('Event store consumer', () => {
         }).start(),
       )
 
-      await setTimeout(500)
-      expect(published).toEqual([])
+      await setTimeout(1_000)
+      const [{ leased }] = await select<{ leased: number }>(
+        pool,
+        'SELECT `lease_until` > NOW(6) AS leased FROM `hermes_subscriptions` WHERE `consumer_name` = ? AND `stream_id` = ?',
+        ['relay', 'task-1'],
+      )
+      // checked only while the dead claim still holds, so a slow start does not make the test flaky
+      if (Number(leased) === 1) {
+        expect(published).toEqual([])
+      }
 
       await waitUntil(() => published.length === 2)
       expect(positionsBy(published, 'task-1')).toEqual([1n, 2n])
@@ -861,6 +904,46 @@ describe('Event store consumer', () => {
       await waitUntil(() => published.length === 2)
       expect(published.map(({ streamId, streamPosition }) => [streamId, streamPosition])).toEqual(
         expect.arrayContaining([
+          ['task-1', 3n],
+          ['task-2', 1n],
+        ]),
+      )
+    })
+  })
+
+  // `startFrom` applies only to a consumer without a checkpoint; how 'end' is stored (a version per stream or a global
+  // marker) is up to the implementation.
+  test("a restarted consumer with startFrom: 'end' resumes from its checkpoint and skips nothing", async () => {
+    await mysql.withDatabase(async ({ pool, options }) => {
+      const eventStore = await setUp(pool)
+      const published: HermesEventEnvelope<SchedulingEvent>[] = []
+      const create = () =>
+        createEventStoreConsumer<SchedulingEvent>({
+          getOptions: () => options,
+          consumerName: 'late',
+          publish: (event) => void published.push(event),
+          pollInterval: Duration.ofMiliseconds(50),
+          startFrom: 'end',
+        })
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('old')])
+
+      let stop = await create().start()
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('new')])
+      await waitUntil(() => published.length === 1)
+      await stop()
+
+      // appended while the consumer is down
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('missed')])
+      await eventStore.appendToStream<SchedulingEvent>('task-2', [note('missed')])
+
+      stop = await create().start()
+      await waitUntil(() => published.length === 3)
+      await stop()
+
+      expect(published.map(({ streamId, streamPosition }) => [streamId, streamPosition])).toEqual(
+        expect.arrayContaining([
+          ['task-1', 2n],
           ['task-1', 3n],
           ['task-2', 1n],
         ]),
@@ -919,6 +1002,35 @@ describe('Event store consumer', () => {
       await waitUntil(() => published === streams + 1)
 
       expect(Date.now() - appendedAt).toBeLessThan(Duration.ofSeconds(1).ms)
+    })
+  })
+
+  // The smoke test above cannot tell a full scan of 5,000 rows from an index; the plan can.
+  test('the query that finds the streams with new events uses an index', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      const eventStore = await setUp(pool)
+
+      for (let i = 0; i < 200; i += 50) {
+        await Promise.all(
+          Array.from({ length: 50 }, (_, j) =>
+            eventStore.appendToStream<SchedulingEvent>(`task-${i + j}`, [note('a')]),
+          ),
+        )
+      }
+      await pool.query('ANALYZE TABLE `hermes_streams`, `hermes_subscriptions`')
+
+      const { text, params } = changedStreamsQuery({ consumerName: 'relay', limit: 10 })
+      const plan = await select<{ table: string; type: string; key: string | null; Extra: string | null }>(
+        pool,
+        `EXPLAIN ${text}`,
+        params,
+      )
+
+      for (const row of plan.filter(({ table }) => table === 'hermes_subscriptions')) {
+        expect(row.type).not.toBe('ALL')
+        expect(row.key).not.toBeNull()
+      }
+      plan.forEach(({ Extra }) => expect(Extra ?? '').not.toContain('Using filesort'))
     })
   })
 })
@@ -1087,6 +1199,52 @@ describe('Async projections', () => {
       expect((await eventStore.readProjection(eventCounter, 'all'))?.data.count).toBe(200)
     })
   })
+
+  // A replay: a checkpoint fixed by hand, a restored backup, or a future "rebuild projection" command.
+  test('a single-stream document skips the events it already applied when the checkpoint goes back', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const notes = defineHermesProjection<{ texts: string[] }, SchedulingEvent>()
+        .ofName('notes')
+        .ofDocumentType()
+        .ofEvents('NoteAdded')
+        .ofInitialState(() => ({ texts: [] }))
+        .ofEvolve((state, event) => ({ texts: [...state.texts, event.data.text] }))
+        .async()
+        .done()
+      const checkpoint = () =>
+        count(pool, 'SELECT `version` AS n FROM `hermes_subscriptions` WHERE `consumer_name` = ? AND `stream_id` = ?', [
+          'projection:notes',
+          'task-1',
+        ])
+
+      onDispose(
+        await createProjectionConsumer({
+          getOptions: () => options,
+          projection: notes,
+          pollInterval: Duration.ofMiliseconds(50),
+        }).start(),
+      )
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a'), note('b'), note('c')])
+      await waitUntil(async () => (await checkpoint()) === 3)
+
+      await pool.query(
+        'UPDATE `hermes_subscriptions` SET `version` = 0 WHERE `consumer_name` = ? AND `stream_id` = ?',
+        ['projection:notes', 'task-1'],
+      )
+      await waitUntil(async () => (await checkpoint()) === 3)
+
+      expect(await eventStore.readProjection(notes, 'task-1')).toEqual({
+        data: { texts: ['a', 'b', 'c'] },
+        version: 3n,
+      })
+    })
+  })
+
+  // Open design question: one `version` cannot guard a document fed by many streams. Choose per-stream versions in the
+  // document, replay = rebuild from scratch, or "multi-stream documents are not idempotent", then write this test.
+  test.todo('a multi-stream document is not changed by a replay of the events it already applied')
 })
 
 describe('Mutex', () => {
@@ -1175,6 +1333,7 @@ describe('Mutex', () => {
       await first.lock()
       await first.unlock()
 
+      expect(await first.stillHeld()).toBe(false)
       expect(await second.tryLock()).toBe(true)
     })
   })
