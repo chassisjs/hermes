@@ -52,3 +52,9 @@ The slot name joins the consumer name and the partition key with `_`: `hermes_sl
 Names that PostgreSQL does not accept (e.g. `tenant-1`, or longer than 63 characters) already get a hash of the pair since `1.0.0-alpha.19`, so they do not collide. Only names made of `[a-z0-9_]` are affected.
 
 **Proposed fix:** Use an unambiguous encoding for every name, e.g. always add a hash of the pair. This changes the slot names of existing installations, so it needs a migration: look up the old slot name, and either rename the slot or create the new one from the position saved in `outboxConsumer` and drop the old one. Release it as a breaking change.
+
+## The publication does not include the outbox of a second schema (PostgreSQL)
+
+**Type:** bug · **Package:** `@chassisjs/hermes-postgresql`
+
+The publication is shared by the whole database, but `migrate` (`packages/hermes-postgresql/src/outbox/migrate.ts`) runs `CREATE PUBLICATION ... FOR TABLE outbox` only when the publication does not exist yet. The `outbox` table of a second schema in the same database is never added to it, so its messages are not streamed and never delivered. Add the table with `ALTER PUBLICATION ... ADD TABLE` when it is missing (`pg_publication_tables`), or use a publication per schema.

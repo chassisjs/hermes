@@ -19,6 +19,9 @@ export const dropReplicationSlot = async (sql: Sql, slotName: SlotName) => {
 const MigrationLock = { classId: 0x48524d53, objectId: 1 }
 const LockTimeoutAttempts = 20
 const LockNotAvailable = '55P03'
+const QueryCanceled = '57014'
+const IndexBuildTimeout = Duration.ofSeconds(30)
+const MigrationLockWarningAfter = Duration.ofSeconds(30)
 
 /**
  * Runs a migration that may wait for a lock of a table, e.g. behind a long transaction of the application. The
@@ -55,23 +58,97 @@ export const migrate = async (sql: Sql, slotName: string) => {
   const connection = await sql.reserve()
 
   try {
-    while (
-      !(
-        await connection<{ locked: boolean }[]>`
-        SELECT pg_try_advisory_lock(${MigrationLock.classId}::int, ${MigrationLock.objectId}::int) AS "locked"
-      `
-      )[0].locked
-    ) {
-      await setTimeout(Duration.ofMiliseconds(200).ms)
-    }
+    await lockMigration(connection)
+
+    let migrationError: unknown
 
     try {
       await migrateSchema(connection, slotName)
+    } catch (error) {
+      migrationError = error
+      throw error
     } finally {
-      await connection`SELECT pg_advisory_unlock(${MigrationLock.classId}::int, ${MigrationLock.objectId}::int)`
+      await unlockMigration(connection, migrationError)
     }
   } finally {
     connection.release()
+  }
+}
+
+const lockMigration = async (connection: ReservedSql) => {
+  const startedAt = Date.now()
+  let warned = false
+
+  while (
+    !(
+      await connection<{ locked: boolean }[]>`
+        SELECT pg_try_advisory_lock(${MigrationLock.classId}::int, ${MigrationLock.objectId}::int) AS "locked"
+      `
+    )[0].locked
+  ) {
+    if (!warned && Date.now() - startedAt > MigrationLockWarningAfter.ms) {
+      warned = true
+      process.emitWarning(
+        'Hermes is waiting for the migration of another instance (an advisory lock of the database). If no other ' +
+          'instance is migrating, check that Hermes connects to PostgreSQL directly or through a session pooler: ' +
+          'a transaction pooler (e.g. PgBouncer in the transaction mode) can leave the lock taken.',
+        { code: 'HERMES_MIGRATION_LOCK' },
+      )
+    }
+
+    await setTimeout(Duration.ofMiliseconds(200).ms)
+  }
+}
+
+const unlockMigration = async (connection: ReservedSql, migrationError: unknown) => {
+  try {
+    const [{ unlocked }] = await connection<{ unlocked: boolean }[]>`
+      SELECT pg_advisory_unlock(${MigrationLock.classId}::int, ${MigrationLock.objectId}::int) AS "unlocked"
+    `
+
+    if (!unlocked) {
+      process.emitWarning(
+        'Hermes could not release the advisory lock of its migration, because the session that took it is not the ' +
+          'current one. Connect to PostgreSQL directly or through a session pooler, not a transaction pooler.',
+        { code: 'HERMES_MIGRATION_LOCK' },
+      )
+    }
+  } catch (error) {
+    if (migrationError === undefined) {
+      throw error
+    }
+  }
+}
+
+/**
+ * Builds the index of the polling outbox `CONCURRENTLY`, so it does not stop the inserts of the application. It waits
+ * for every transaction that started before it, e.g. a long backup, so it gives up after a while: the outbox works
+ * without the index, only its polls are slower, and the next start builds it again.
+ */
+const buildPendingIndex = async (sql: ReservedSql, isInvalid: boolean) => {
+  try {
+    await sql`SELECT set_config('statement_timeout', ${String(IndexBuildTimeout.ms)}, false)`
+
+    if (isInvalid) {
+      await sql`DROP INDEX CONCURRENTLY IF EXISTS "asyncOutboxPendingIdx"`
+    }
+    await sql`
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS "asyncOutboxPendingIdx" ON "asyncOutbox" ("consumerName", "partitionKey", "position")
+      WHERE "delivered" = false
+    `
+  } catch (error) {
+    if ((error as { code?: string }).code !== QueryCanceled) {
+      throw error
+    }
+
+    process.emitWarning(
+      `Hermes could not build the index "asyncOutboxPendingIdx" in ${IndexBuildTimeout.ms} ms, because older ` +
+        'transactions are still running. The polling outbox works without it, but its polls are slower. The next ' +
+        'start builds it again.',
+      { code: 'HERMES_INDEX_NOT_BUILT' },
+    )
+  } finally {
+    await sql`RESET statement_timeout`
   }
 }
 
@@ -212,14 +289,8 @@ const migrateSchema = async (sql: ReservedSql, slotName: string) => {
     WHERE n.nspname = current_schema() AND c.relname = 'asyncOutboxPendingIdx'
   `
 
-  if (pendingIndex && !pendingIndex.isValid) {
-    await sql`DROP INDEX CONCURRENTLY IF EXISTS "asyncOutboxPendingIdx"`
-  }
   if (!pendingIndex?.isValid) {
-    await sql`
-      CREATE INDEX CONCURRENTLY IF NOT EXISTS "asyncOutboxPendingIdx" ON "asyncOutbox" ("consumerName", "partitionKey", "position")
-      WHERE "delivered" = false
-    `
+    await buildPendingIndex(sql, pendingIndex !== undefined)
   }
 
   await sql.unsafe(`

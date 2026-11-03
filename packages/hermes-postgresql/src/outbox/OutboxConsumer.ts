@@ -384,55 +384,65 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
       this._state = new OutboxConsumerState(new OutboxConsumerStore(sql, consumerName, partitionKey))
     }
 
-    await migrate(sql, slotName)
-
-    await this._state.createOrLoad(partitionKey)
-
-    const replicationState: LogicalReplicationState = {
-      lastProcessedLsn: this._state.lastProcessedLsn,
-      timestamp: new Date(),
-      publication: PublicationName,
-      slotName,
-    }
-
     try {
-      replication = await startLogicalReplication<InsertResult>({
-        state: replicationState,
-        sql: subscribeSql,
-        columnConfig: {
-          position: 'bigint',
-          messageId: 'text',
-          messageType: 'text',
-          partitionKey: 'text',
-          payload: 'jsonb',
-        },
-        onInsert: async (transaction, acknowledge) => {
-          const message = {
-            transaction,
-            acknowledge: async () => {
-              assert(this._state)
-              acknowledge()
-              await this._state.moveFurther(transaction.lsn)
-            },
-          }
-          publishingQueue.queue(message)
+      await migrate(sql, slotName)
 
-          if (publishingQueue.size() >= maxQueueSize) {
-            replication?.pause()
-          }
+      await this._state.createOrLoad(partitionKey)
 
-          await publishingQueue.run(message)
-          // await sql.begin(async (sql) => {
-          //   await publishingQueue.run(message)
-          // })
-        },
-      })
-    } catch (e) {
-      if (e instanceof postgres.PostgresError && (e.routine === 'ReplicationSlotAcquire' || e.code === '55006')) {
-        throw new HermesConsumerAlreadyTakenError({ consumerName, partitionKey })
+      const replicationState: LogicalReplicationState = {
+        lastProcessedLsn: this._state.lastProcessedLsn,
+        timestamp: new Date(),
+        publication: PublicationName,
+        slotName,
       }
 
-      throw e
+      try {
+        replication = await startLogicalReplication<InsertResult>({
+          state: replicationState,
+          sql: subscribeSql,
+          columnConfig: {
+            position: 'bigint',
+            messageId: 'text',
+            messageType: 'text',
+            partitionKey: 'text',
+            payload: 'jsonb',
+          },
+          onInsert: async (transaction, acknowledge) => {
+            const message = {
+              transaction,
+              acknowledge: async () => {
+                assert(this._state)
+                acknowledge()
+                await this._state.moveFurther(transaction.lsn)
+              },
+            }
+            publishingQueue.queue(message)
+
+            if (publishingQueue.size() >= maxQueueSize) {
+              replication?.pause()
+            }
+
+            await publishingQueue.run(message)
+            // await sql.begin(async (sql) => {
+            //   await publishingQueue.run(message)
+            // })
+          },
+        })
+      } catch (e) {
+        if (e instanceof postgres.PostgresError && (e.routine === 'ReplicationSlotAcquire' || e.code === '55006')) {
+          throw new HermesConsumerAlreadyTakenError({ consumerName, partitionKey })
+        }
+
+        throw e
+      }
+    } catch (error) {
+      const timeout = Duration.ofSeconds(1).ms
+
+      await Promise.all([swallow(() => sql.end({ timeout })), swallow(() => subscribeSql.end({ timeout }))])
+      this._sql = null
+      this._state = undefined
+
+      throw error
     }
 
     let asyncOutboxStop: Stop | undefined
