@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
-# Unreleased (1.0.0-alpha.23)
+# [1.0.0-alpha.23](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.22...v1.0.0-alpha.23) (2026-11-03)
 
 `1.0.0-alpha.22` shipped the first version of the event sourcing API without an entry here; this section covers both.
 

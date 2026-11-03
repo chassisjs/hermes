@@ -1,6 +1,6 @@
 # Change Log
 
-# Unreleased (1.0.0-alpha.23)
+# [1.0.0-alpha.23](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.22...v1.0.0-alpha.23) (2026-11-03)
 
 ### Chores
 
