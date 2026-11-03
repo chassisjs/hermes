@@ -1,5 +1,41 @@
 # Change Log
 
+# [1.0.0-alpha.20](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.19...v1.0.0-alpha.20) (2026-11-03)
+
+The async outbox is now built on the polling outbox of the core package: it keeps the order per partition, separates consumers and partitions, and several instances share the work.
+
+## ⚠️ Breaking changes
+
+- **The async outbox publishes in the order of each partition by default** (`ordering: 'partition'`), and a message that cannot be published stops its partition until it is published. Pass `ordering: 'none'` to `useBasicAsyncOutboxConsumerPolicy` for the previous behaviour, where a failed message does not stop the others.
+- **`queue()` and `send()` store the messages in the partition of the consumer by default**, instead of `'default'`. Pass `partitionKey` to store them in another one.
+- Requires `@chassisjs/hermes` `1.0.0-alpha.20`.
+
+## Upgrade
+
+- `start()` adds the columns `partitionKey`, `nextAttemptAt`, `claimedBy` and `claimedUntil` to `asyncOutbox` and the table `asyncOutboxPartition`. The messages stored by earlier versions get the `'default'` partition.
+- **Stop the instances of earlier versions before you start the new ones.** They publish the messages of all partitions and know no claims, so during a rolling deployment a message can be published twice, out of order, or by a consumer of another partition.
+- **Big `asyncOutbox` tables (more than 10 000 rows, also delivered ones) need the index of the polling outbox built by hand.** Hermes warns about it (`HERMES_INDEX_MISSING`); without it, every poll reads the whole table. Run it before you start the new version, or right after:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "asyncOutboxPendingIdx"
+ON "asyncOutbox" ("consumerName", "partitionKey", "position") WHERE "delivered" = false;
+```
+
+- Connect Hermes directly or through a session pooler, not a transaction pooler: instances that start at the same time migrate one after another under an advisory lock of the session.
+
+## Features
+
+- Async outbox options: `ordering`, `batchSize`, `lease`, `retry`, `onFailedPublish`, `onDbError`, and `partitionKey` in `send(message, { tx, partitionKey })`. `send(message, tx)` still works.
+- `createPollingStore` is exported, to poll the `asyncOutbox` table with your own polling outbox.
+
+## Bug fixes
+
+- The async outbox published the messages of every consumer and partition; now only those of its `consumerName` and `partitionKey`.
+- Stopping the consumer waits for the async outbox before it closes the connection.
+- A failed `start()` closes its connections and the async outbox.
+- The migration takes no lock of a table that is up to date, gives up a table lock after 500 ms and tries again, so it does not stop the inserts of the application behind a long transaction.
+- The async outbox `partitionKey` is `VARCHAR(250)`, so a UUID fits.
+
 # [1.0.0-alpha.19](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.18...v1.0.0-alpha.19) (2026-11-02)
 
 A bigger release: backpressure, transactions of any database library, partitions that actually separate messages, and postgres.js 4.

@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# [1.0.0-alpha.20](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.19...v1.0.0-alpha.20) (2026-11-03)
+
+### Features
+
+- **Polling outbox** (`createPollingOutbox`): a database-independent engine that polls an outbox table and publishes the messages. It keeps no "last published position", so a message whose transaction commits after one with a greater auto-increment id is not skipped. Every message has its own state (delivered, attempts, claim), and delivery is at-least-once.
+- **Ordering policies:** `usePartitionOrderingPolicy` publishes every partition by one instance at a time, in order, and a failed message stops its partition until it is published; `useNoOrderingPolicy` lets many instances publish the messages in any order. `useExponentialRetryPolicy` (1 second, doubled, at most 1 minute) is the default retry.
+- Claims are leases, renewed while publishing. A lane stops when its claim was lost or not renewed for two thirds of the lease, so it does not publish next to an instance that took it over.
+
 # [1.0.0-alpha.19](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.18...v1.0.0-alpha.19) (2026-11-02)
 
 ### Chores
