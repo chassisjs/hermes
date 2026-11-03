@@ -20,6 +20,7 @@ const MigrationLock = { classId: 0x48524d53, objectId: 1 }
 const LockTimeoutAttempts = 20
 const LockNotAvailable = '55P03'
 const MigrationLockWarningAfter = Duration.ofSeconds(30)
+const MigrationLockTimeout = Duration.ofMinutes(10)
 
 /**
  * Runs a migration that may wait for a lock of a table, e.g. behind a long transaction of the application. The
@@ -48,9 +49,9 @@ const migrateWithLockTimeout = async (migration: () => Promise<unknown>) => {
  *
  * Instances that start at the same time migrate one after another (an advisory lock of the database, held by one
  * connection for the whole migration). The others try to take the lock again and again instead of waiting in a
- * statement, because `CREATE INDEX CONCURRENTLY` waits for the transactions that started before it, so it would wait
- * for them while they wait for it. The upgrades check the schema first, so they take no lock of a table that is up
- * to date. The index of the polling outbox is created only with an empty table ({@link warnAboutPendingIndex}).
+ * statement, so they can warn after 30 seconds and give up after 10 minutes, e.g. when a connection of an instance
+ * that died still holds the lock. The upgrades check the schema first, so they take no lock of a table that is up
+ * to date. The index of the polling outbox is created only with a small table ({@link warnAboutPendingIndex}).
  */
 export const migrate = async (sql: Sql, slotName: string) => {
   const connection = await sql.reserve()
@@ -84,6 +85,14 @@ const lockMigration = async (connection: ReservedSql) => {
       `
     )[0].locked
   ) {
+    if (Date.now() - startedAt > MigrationLockTimeout.ms) {
+      throw new Error(
+        `Hermes could not take the advisory lock of its migration within ${MigrationLockTimeout.ms} ms. Another ` +
+          'session holds it: find it in pg_locks (locktype = advisory, classid = 1213353299, objid = 1) and ' +
+          'pg_stat_activity, e.g. a connection of an instance that died, and end it with pg_terminate_backend.',
+      )
+    }
+
     if (!warned && Date.now() - startedAt > MigrationLockWarningAfter.ms) {
       warned = true
       process.emitWarning(
@@ -133,9 +142,9 @@ const findPendingIndex = async (sql: Sql | ReservedSql) => {
 }
 
 /**
- * Warns (`process.emitWarning`) when the index of the polling outbox is missing or invalid. Hermes creates it only with
- * an empty `asyncOutbox` table, because `CREATE INDEX` would stop the inserts of the application while it reads a big
- * table, and `CREATE INDEX CONCURRENTLY` waits for all older transactions, so it does not belong in the start of an
+ * Warns (`process.emitWarning`) when the index of the polling outbox is missing or invalid. Hermes creates it only
+ * when `asyncOutbox` has at most 10 000 rows, because `CREATE INDEX` would stop the inserts of the application while
+ * it reads a big table, and `CREATE INDEX CONCURRENTLY` waits for all older transactions, so it does not belong in the start of an
  * application. Build it yourself, e.g. after the upgrade.
  */
 const warnAboutPendingIndex = async (sql: ReservedSql) => {
@@ -279,7 +288,7 @@ const migrateSchema = async (sql: ReservedSql, slotName: string) => {
         END IF;
 
         IF to_regclass(format('%I.%I', current_schema(), 'asyncOutboxPendingIdx')) IS NULL
-          AND NOT EXISTS (SELECT 1 FROM "asyncOutbox")
+          AND (SELECT COUNT(*) FROM (SELECT 1 FROM "asyncOutbox" LIMIT 10001) AS "rows") <= 10000
         THEN
           CREATE INDEX IF NOT EXISTS "asyncOutboxPendingIdx" ON "asyncOutbox" ("consumerName", "partitionKey", "position")
           WHERE "delivered" = false;

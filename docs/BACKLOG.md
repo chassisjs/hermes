@@ -58,3 +58,9 @@ Names that PostgreSQL does not accept (e.g. `tenant-1`, or longer than 63 charac
 **Type:** bug · **Package:** `@chassisjs/hermes-postgresql`
 
 The publication is shared by the whole database, but `migrate` (`packages/hermes-postgresql/src/outbox/migrate.ts`) runs `CREATE PUBLICATION ... FOR TABLE outbox` only when the publication does not exist yet. The `outbox` table of a second schema in the same database is never added to it, so its messages are not streamed and never delivered. Add the table with `ALTER PUBLICATION ... ADD TABLE` when it is missing (`pg_publication_tables`), or use a publication per schema.
+
+## A lost claim stops all the lanes of a batch (polling outbox)
+
+**Type:** improvement · **Package:** `@chassisjs/hermes`
+
+When `renewPartitions` renews fewer partitions than the batch has, the polling outbox (`packages/hermes/src/pollingOutbox/createPollingOutbox.ts`) stops all the lanes of the batch, also the ones whose claims are still held. It is safe, but it lowers the throughput when partitions are taken over often. Let the store return the renewed partition keys and stop only the lanes of the lost ones.

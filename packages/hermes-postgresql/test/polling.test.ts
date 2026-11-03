@@ -379,7 +379,7 @@ describe('Async outbox', () => {
     })
   })
 
-  test('creates the index of the polling outbox only with an empty table, and warns about a missing one', async () => {
+  test('creates the index of the polling outbox only with a small table, and warns about a missing one', async () => {
     await postgres(async (sql) => {
       const emitWarning = jest.spyOn(process, 'emitWarning').mockImplementation(() => {})
       const pendingIndex = () => sql`
@@ -398,7 +398,16 @@ describe('Async outbox', () => {
         await sql`DROP INDEX "asyncOutboxPendingIdx"`
         await sql`
           INSERT INTO "asyncOutbox" ("consumerName", "messageId", "messageType", "data")
-          VALUES ('app', 'm1', 'Test', '{}'::jsonb)
+          SELECT 'app', 'm' || i, 'Test', '{}'::jsonb FROM generate_series(1, 10000) AS i
+        `
+        await migrateTables(sql)
+
+        expect(await pendingIndex()).toEqual([{ isValid: true }])
+
+        await sql`DROP INDEX "asyncOutboxPendingIdx"`
+        await sql`
+          INSERT INTO "asyncOutbox" ("consumerName", "messageId", "messageType", "data")
+          VALUES ('app', 'one-too-many', 'Test', '{}'::jsonb)
         `
         await migrateTables(sql)
 
