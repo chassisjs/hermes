@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# [1.0.0-alpha.21](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.20...v1.0.0-alpha.21) (2026-11-03)
+
+### Features
+
+- `parseIncrementalId` accepts a string too, e.g. a `BIGINT` that the database driver returns as a string. The string has to be written only with digits, without leading zeros, and is converted to a number; a value greater than `Number.MAX_SAFE_INTEGER` is rejected.
+
 # [1.0.0-alpha.20](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.19...v1.0.0-alpha.20) (2026-11-03)
 
 ### Features

@@ -16,19 +16,22 @@ const incrementalIdTest: IncrementalIdTest = 1
 assertSomething(incrementalIdTest)
 
 /**
- * Checks that the value is a safe integer greater than 0.
+ * Checks that the value is a safe integer greater than 0. A string, e.g. a `BIGINT` returned by the database driver as
+ * a string, has to be written only with digits, without leading zeros, and is converted to a number.
  *
  * @param arg - The value to check
  * @param error - The message of the error thrown when the value is not an incremental identifier
  * @throws {AssertionError} When the value is not a safe integer greater than 0
  */
 export const parseIncrementalId = <T extends string = string>(
-  arg: number | undefined,
+  arg: string | number | undefined,
   error?: string,
 ): IncrementalId<T> => {
-  if (!Number.isSafeInteger(arg) || (arg as number) <= 0) {
+  const value = typeof arg === 'string' && /^[1-9]\d*$/.test(arg) ? Number(arg) : arg
+
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
     throw new AssertionError({ forValue: arg }, error || `The value is not an integer greater than 0`)
   }
 
-  return arg as number
+  return value
 }
