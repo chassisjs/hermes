@@ -325,6 +325,64 @@ describe('Async outbox', () => {
     })
   })
 
+  test('repairs the async outbox migrated by earlier builds and migrates again without waiting for open transactions', async () => {
+    await postgres(async (sql) => {
+      await migrate(sql, 'hermes_slot_app_default')
+      await sql`ALTER TABLE "asyncOutbox" ALTER COLUMN "partitionKey" DROP NOT NULL`
+      await sql`ALTER TABLE "asyncOutbox" ALTER COLUMN "partitionKey" DROP DEFAULT`
+      await sql`ALTER TABLE "asyncOutbox" ALTER COLUMN "partitionKey" TYPE VARCHAR(30)`
+      await sql`ALTER TABLE "asyncOutboxPartition" ALTER COLUMN "partitionKey" TYPE VARCHAR(30)`
+      await sql`
+        INSERT INTO "asyncOutbox" ("consumerName", "messageId", "messageType", "data")
+        VALUES ('app', 'old', 'Test', '{}'::jsonb)
+      `
+
+      await migrate(sql, 'hermes_slot_app_default')
+
+      expect(await sql`SELECT "partitionKey" FROM "asyncOutbox"`).toEqual([{ partitionKey: 'default' }])
+      expect(
+        await sql`
+          SELECT table_name, character_maximum_length, is_nullable, column_default
+          FROM information_schema.columns
+          WHERE table_name IN ('asyncOutbox', 'asyncOutboxPartition') AND column_name = 'partitionKey'
+          ORDER BY table_name
+        `,
+      ).toEqual([
+        {
+          table_name: 'asyncOutbox',
+          character_maximum_length: 250,
+          is_nullable: 'NO',
+          column_default: "'default'::character varying",
+        },
+        {
+          table_name: 'asyncOutboxPartition',
+          character_maximum_length: 250,
+          is_nullable: 'NO',
+          column_default: null,
+        },
+      ])
+
+      const tx = await sql.reserve()
+
+      try {
+        await tx`BEGIN`
+        await tx`
+          INSERT INTO "asyncOutbox" ("consumerName", "messageId", "messageType", "data")
+          VALUES ('app', 'uncommitted', 'Test', '{}'::jsonb)
+        `
+        await expect(
+          Promise.race([
+            migrate(sql, 'hermes_slot_app_default').then(() => 'migrated'),
+            setTimeout(Duration.ofSeconds(5).ms, 'blocked'),
+          ]),
+        ).resolves.toBe('migrated')
+      } finally {
+        await tx`ROLLBACK`
+        tx.release()
+      }
+    })
+  })
+
   test('stopping the consumer waits for the async outbox before it closes the connection', async () => {
     await postgres(async (sql, container) => {
       let isPublishing = false

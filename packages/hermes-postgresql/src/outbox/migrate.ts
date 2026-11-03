@@ -66,19 +66,51 @@ export const migrate = async (sql: Sql, slotName: string) => {
     );
   `
 
-  await sql`CREATE INDEX IF NOT EXISTS "asyncOutboxDeliveredIdx" ON "asyncOutbox" ("delivered" ASC);`
-  await sql`CREATE INDEX IF NOT EXISTS "asyncOutboxDeliveredWithDateIdx" ON "asyncOutbox" ("delivered" ASC, "addedAt" ASC);`
+  await sql`
+    DO $$
+    BEGIN
+      IF to_regclass('"asyncOutboxDeliveredIdx"') IS NULL THEN
+        CREATE INDEX "asyncOutboxDeliveredIdx" ON "asyncOutbox" ("delivered" ASC);
+      END IF;
 
-  await sql`
-    ALTER TABLE "asyncOutbox"
-      ADD COLUMN IF NOT EXISTS "partitionKey"   VARCHAR(250)  DEFAULT 'default' NOT NULL,
-      ADD COLUMN IF NOT EXISTS "nextAttemptAt"  TIMESTAMPTZ   NULL,
-      ADD COLUMN IF NOT EXISTS "claimedBy"      VARCHAR(250)  NULL,
-      ADD COLUMN IF NOT EXISTS "claimedUntil"   TIMESTAMPTZ   NULL;
-  `
-  await sql`
-    CREATE INDEX IF NOT EXISTS "asyncOutboxPendingIdx" ON "asyncOutbox" ("consumerName", "partitionKey", "position")
-    WHERE "delivered" = false;
+      IF to_regclass('"asyncOutboxDeliveredWithDateIdx"') IS NULL THEN
+        CREATE INDEX "asyncOutboxDeliveredWithDateIdx" ON "asyncOutbox" ("delivered" ASC, "addedAt" ASC);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'asyncOutbox' AND column_name = 'partitionKey'
+      ) THEN
+        ALTER TABLE "asyncOutbox"
+          ADD COLUMN "partitionKey"   VARCHAR(250)  DEFAULT 'default' NOT NULL,
+          ADD COLUMN "nextAttemptAt"  TIMESTAMPTZ   NULL,
+          ADD COLUMN "claimedBy"      VARCHAR(250)  NULL,
+          ADD COLUMN "claimedUntil"   TIMESTAMPTZ   NULL;
+      ELSIF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'asyncOutbox' AND column_name = 'partitionKey'
+          AND (character_maximum_length < 250 OR is_nullable = 'YES' OR column_default IS NULL)
+      ) THEN
+        UPDATE "asyncOutbox" SET "partitionKey" = 'default' WHERE "partitionKey" IS NULL;
+        ALTER TABLE "asyncOutbox"
+          ALTER COLUMN "partitionKey" TYPE VARCHAR(250),
+          ALTER COLUMN "partitionKey" SET DEFAULT 'default',
+          ALTER COLUMN "partitionKey" SET NOT NULL;
+      END IF;
+
+      IF to_regclass('"asyncOutboxPendingIdx"') IS NULL THEN
+        CREATE INDEX "asyncOutboxPendingIdx" ON "asyncOutbox" ("consumerName", "partitionKey", "position")
+        WHERE "delivered" = false;
+      END IF;
+
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'asyncOutboxPartition' AND column_name = 'partitionKey'
+          AND character_maximum_length < 250
+      ) THEN
+        ALTER TABLE "asyncOutboxPartition" ALTER COLUMN "partitionKey" TYPE VARCHAR(250);
+      END IF;
+    END $$;
   `
   await sql`
     CREATE TABLE IF NOT EXISTS "asyncOutboxPartition" (
