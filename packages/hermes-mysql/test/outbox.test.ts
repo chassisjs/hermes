@@ -637,6 +637,38 @@ describe('Review fixes', () => {
     })
   })
 
+  test('markDelivered tries again when a transaction of the application locks the message for a while', async () => {
+    await mysql.withDatabase(async ({ options, pool, onDispose }) => {
+      const outbox = createConsumer(options, () => {})
+      const pollingPool = createPollingPool(options)
+      const store = createPollingStore<Event>(() => pollingPool, { consumerName: 'app' })
+
+      onDispose(() => pollingPool.end())
+
+      await migrate(pool)
+      await outbox.queue(envelope('m1'))
+
+      const [message] = await store.claimMessages({ owner: 'first', lease: Duration.ofSeconds(30), limit: 1 })
+      const connection = await pool.getConnection()
+
+      try {
+        await connection.beginTransaction()
+        await connection.query('SELECT * FROM `hermes_outbox` FOR UPDATE')
+
+        const committing = setTimeout(Duration.ofSeconds(6).ms).then(() => connection.commit())
+
+        await store.markDelivered(message)
+        await committing
+      } finally {
+        connection.release()
+      }
+
+      expect(await select(pool, 'SELECT `delivered_at` IS NOT NULL AS `delivered` FROM `hermes_outbox`')).toEqual([
+        { delivered: '1' },
+      ])
+    })
+  })
+
   test('a failed start closes the polling pool and can be tried again', async () => {
     await mysql.withDatabase(async ({ options, pool }) => {
       await expect(createConsumer(options, () => {}, { maxPartitions: 0 }).start()).rejects.toThrow(/partitions/i)

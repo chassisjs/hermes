@@ -5,7 +5,7 @@ import {
   type PolledMessage,
 } from '@chassisjs/hermes'
 import { type Pool, type RowDataPacket } from 'mysql2/promise'
-import { inTransaction, OutboxTable, PartitionTable } from './sql.js'
+import { inTransaction, OutboxTable, PartitionTable, retryOnLockWaitTimeout } from './sql.js'
 
 type OutboxRow<Message> = RowDataPacket & {
   position: string | number
@@ -51,6 +51,9 @@ const microseconds = (duration: Duration) => Math.round(duration.ms * 1000)
  * `markFailed` changes a message only when `owner` still has the claim of the message, or of its partition when the
  * message itself is not claimed (`usePartitionOrderingPolicy`).
  *
+ * `markDelivered` and the renewals try again when they wait for a lock of a row too long (`innodb_lock_wait_timeout`
+ * of {@link createPollingPool}).
+ *
  * `markDelivered` does not check the claim on purpose: the message is already published, so it is delivered whoever
  * published it. Checking the claim would only leave a published message undelivered, to be published again.
  *
@@ -80,11 +83,13 @@ const createPollingStore = <Message>(
 
   return {
     async markDelivered(message) {
-      await getPool().query(
-        `UPDATE \`${OutboxTable}\`
+      await retryOnLockWaitTimeout(() =>
+        getPool().query(
+          `UPDATE \`${OutboxTable}\`
          SET \`delivered_at\` = NOW(6), \`claimed_by\` = NULL, \`claimed_until\` = NULL
          WHERE \`position\` = ? AND \`delivered_at\` IS NULL`,
-        [message.id],
+          [message.id],
+        ),
       )
     },
 
@@ -147,11 +152,13 @@ const createPollingStore = <Message>(
     },
 
     async renewMessages({ owner, lease, messages }) {
-      await getPool().query(
-        `UPDATE \`${OutboxTable}\`
+      await retryOnLockWaitTimeout(() =>
+        getPool().query(
+          `UPDATE \`${OutboxTable}\`
          SET \`claimed_until\` = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND)
          WHERE \`position\` IN (?) AND \`claimed_by\` = ? AND \`delivered_at\` IS NULL`,
-        [microseconds(lease), messages.map(({ id }) => id), owner],
+          [microseconds(lease), messages.map(({ id }) => id), owner],
+        ),
       )
     },
 
@@ -275,11 +282,13 @@ const createPollingStore = <Message>(
     },
 
     async renewPartitions({ owner, lease, partitionKeys }) {
-      await getPool().query(
-        `UPDATE \`${PartitionTable}\`
+      await retryOnLockWaitTimeout(() =>
+        getPool().query(
+          `UPDATE \`${PartitionTable}\`
          SET \`claimed_until\` = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND)
          WHERE \`consumer_name\` = ? AND \`partition_key\` IN (?) AND \`claimed_by\` = ?`,
-        [microseconds(lease), consumerName, partitionKeys, owner],
+          [microseconds(lease), consumerName, partitionKeys, owner],
+        ),
       )
     },
 

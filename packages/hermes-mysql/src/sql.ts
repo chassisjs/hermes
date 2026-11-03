@@ -10,6 +10,7 @@ const MaxRowsPerStatement = 1000
 const DefaultPollingConnectionLimit = 3
 const PollingProgramName = 'hermes-polling'
 const LockWaitTimeoutSeconds = 5
+const LockWaitTimeoutErrno = 1205
 
 /**
  * Creates the pool that Hermes polls the outbox with.
@@ -23,9 +24,9 @@ const LockWaitTimeoutSeconds = 5
  * Keep it apart from the pool of the application, so the isolation level of the application does not change. Hermes
  * needs only a few connections, so the pool has at most `connectionLimit` of them, and the statements wait in a queue
  * for a free connection (`waitForConnections` and `queueLimit` of `options` are ignored). The statements are short, so
- * a few connections serve many partitions published at the same time. A statement waits for a row lock at most
- * 5 seconds (`innodb_lock_wait_timeout`), so a row locked by the application does not hold a connection, and the
- * renewals of the claims queued behind it, for longer.
+ * a few connections serve many partitions published at the same time. A statement waits for a lock of a row
+ * (`innodb_lock_wait_timeout`) or of a table (`lock_wait_timeout`, e.g. behind `ALTER TABLE`) at most 5 seconds, so
+ * it does not hold a connection, and the renewals of the claims queued behind it, for longer.
  *
  * @param options - The options of the `mysql2` pool
  * @param connectionLimit - The maximum number of connections of the pool
@@ -50,7 +51,7 @@ const createPollingPool = (options: PoolOptions, connectionLimit = DefaultPollin
 
   pool.on('connection', (connection) => {
     connection.query(
-      `SET SESSION transaction_isolation = 'READ-COMMITTED', SESSION innodb_lock_wait_timeout = ${LockWaitTimeoutSeconds}`,
+      `SET SESSION transaction_isolation = 'READ-COMMITTED', SESSION innodb_lock_wait_timeout = ${LockWaitTimeoutSeconds}, SESSION lock_wait_timeout = ${LockWaitTimeoutSeconds}`,
       (error) => {
         if (error) {
           connection.destroy()
@@ -91,6 +92,22 @@ const inTransaction = async <T>(
     throw error
   } finally {
     connection.release()
+  }
+}
+
+/**
+ * Runs a short statement that changes rows by their primary key again when it waited too long for a lock of a row
+ * (`ER_LOCK_WAIT_TIMEOUT`), e.g. because a transaction of the application locked it for a moment.
+ */
+const retryOnLockWaitTimeout = async <T>(statement: () => Promise<T>, attempts = 3): Promise<T> => {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await statement()
+    } catch (error) {
+      if ((error as { errno?: number }).errno !== LockWaitTimeoutErrno || attempt >= attempts) {
+        throw error
+      }
+    }
   }
 }
 
@@ -147,4 +164,5 @@ export {
   MigrationTable,
   OutboxTable,
   PartitionTable,
+  retryOnLockWaitTimeout,
 }
