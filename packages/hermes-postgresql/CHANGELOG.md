@@ -1,5 +1,11 @@
 # Change Log
 
+# Unreleased (1.0.0-alpha.23)
+
+### Chores
+
+- The tests and `src/test.ts` are no longer published in `lib`. `1.0.0-alpha.22` was published without an entry here: it only stopped publishing the `*.test.ts` files of `src`.
+
 # [1.0.0-alpha.20](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.19...v1.0.0-alpha.20) (2026-11-03)
 
 The async outbox is now built on the polling outbox of the core package: it keeps the order per partition, separates consumers and partitions, and several instances share the work.

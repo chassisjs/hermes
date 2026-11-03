@@ -3,6 +3,33 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# Unreleased (1.0.0-alpha.23)
+
+`1.0.0-alpha.22` shipped the first version of the event store without an entry here; this section covers both. It needs `@chassisjs/hermes` `~1.0.0-alpha.23`.
+
+### Features
+
+- **Event store**, opt-in: `migrate(pool, { eventStore: true })` adds `hermes_streams`, `hermes_events`, `hermes_subscriptions`, `hermes_projections` and `hermes_projection_versions`, on their own track of migrations (`hermes_event_store_migrations`). An application that uses only the outbox gets none of them.
+- `createEventStore(pool, { projections })`: an append locks its stream, checks the expected version, stores the events and updates the inline projections in one transaction: its own, or the one of the application (`tx`), inside a savepoint, so a rejected append leaves nothing and the transaction stays usable.
+- `fromInlineProjection`: a state-stored decider reads its state from the document of a single-stream inline projection.
+- `createEventStoreConsumer` (e.g. a relay to a message broker) and `createProjectionConsumer` (async projections), on the polling outbox: one instance publishes a stream at a time, in order, and the checkpoint and the claim of every stream live in `hermes_subscriptions`. `startFrom: 'end'` starts a new consumer after the existing events. Every projection document keeps the version of every stream that fed it, so replays and redeliveries are idempotent.
+- `createMutex`: a named lock of MySQL (`GET_LOCK`), e.g. for a scheduler that runs on one instance; `lock(signal)` can be aborted.
+- `changedStreamsQuery` is exported.
+
+### Limits
+
+- Every poll of every consumer instance reads all the streams, so its cost grows with their number; tested up to 5,000 streams.
+- `hermes_projection_versions` keeps one row per document and stream, and is never cleaned.
+- An inline projection whose document is fed by many streams serializes the appends that feed it.
+
+### Fixes since 1.0.0-alpha.22
+
+- An append in a `REPEATABLE READ` transaction of the application whose snapshot was older than the documents of its stream failed with `ER_DUP_ENTRY`.
+- A projection added to a running application built documents from the new events only, so a state-stored decider decided on an empty state. A new document now catches up from all the events of its stream, once.
+- A decider whose document was deleted by `evolve` got `null` instead of the initial state.
+- Streams early in the key order could starve the others; the consumers now take turns.
+- Appends or projections creating the same stream or document at once could deadlock.
+
 # [1.0.0-alpha.20](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.19...v1.0.0-alpha.20) (2026-11-03)
 
 The first release of the outbox for MySQL 8.0+ and Aurora MySQL 3, built on the polling outbox of `@chassisjs/hermes`.

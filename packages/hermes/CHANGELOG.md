@@ -3,6 +3,25 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# Unreleased (1.0.0-alpha.23)
+
+`1.0.0-alpha.22` shipped the first version of the event sourcing API without an entry here; this section covers both.
+
+### Features
+
+- **Deciders** (`createCommandHandler`): `decide(command, state)`, `evolve(state, event)` and `initialState()`, as in Emmett. The state comes from the events of the stream, or from `loadState` (state-stored, e.g. a document of an inline projection). New events are appended at the version the state was loaded at, so a concurrent change is a `VersionConflictError`.
+- Retries: `retry: { attempts, delay }`, where `delay` is a `RetryPolicy` (e.g. `useExponentialRetryPolicy`). Only a `VersionConflictError` is retried, never when the caller gives its own `expectedVersion`, and never in a transaction of the application (`tx`): under `REPEATABLE READ` the retry would read the same snapshot, so retry the whole transaction instead. `handle(..., { signal })` stops the command, also while it waits for a retry.
+- `createInMemoryEventStore`, `VersionConflictError` and `assertExpectedVersion`; the expected version is a `bigint` (`0n`: the stream does not exist), `'no_stream'`, `'stream_exists'` or `'any'`.
+- **Projections** (`defineHermesProjection`): a fluent builder in which `evolve` gets only the events listed in `ofEvents`, `ofId` makes a document fed by many streams, `.inline()` / `.async()` choose how it is updated, and returning `null` from `evolve` deletes the document. `applyProjection` applies events to a document.
+
+### Fixes since 1.0.0-alpha.22
+
+- A version conflict in a transaction of the application (`tx`) is not retried any more: the retries could only conflict again.
+
+### Chores
+
+- The tests and the fixtures in `src` are no longer published in `lib`.
+
 # [1.0.0-alpha.21](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.20...v1.0.0-alpha.21) (2026-11-03)
 
 ### Features
