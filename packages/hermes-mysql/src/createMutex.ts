@@ -23,8 +23,8 @@ const lockNameOf = (name: string) => {
 type Mutex = {
   /** Takes the lock when it is free. @returns whether this instance holds the lock */
   tryLock(): Promise<boolean>
-  /** Waits until it takes the lock, trying every `retryEvery`. */
-  lock(): Promise<void>
+  /** Waits until it takes the lock, trying every `retryEvery`. Rejects with `AbortError` when `signal` aborts. */
+  lock(signal?: AbortSignal): Promise<void>
   /** Whether this instance still holds the lock: `false` once its connection was lost, e.g. after a failover. */
   stillHeld(): Promise<boolean>
   /** Releases the lock and closes the connection. Does nothing when the lock is not held. */
@@ -39,7 +39,8 @@ type Mutex = {
  * a failover of Aurora releases it: call {@link Mutex.stillHeld} before every piece of work and stop when it is false.
  *
  * `GET_LOCK` is reentrant, but the mutex is not: taking the lock again while holding it does nothing, so one
- * `unlock()` releases it.
+ * `unlock()` releases it. An instance that does not hold the lock keeps its connection open between its attempts,
+ * until `unlock()`.
  */
 const createMutex = (params: { getOptions: () => PoolOptions; name: string; retryEvery?: Duration }): Mutex => {
   const name = lockNameOf(params.name)
@@ -91,7 +92,9 @@ const createMutex = (params: { getOptions: () => PoolOptions; name: string; retr
     }
   }
 
-  const tryLock = async () => {
+  let pending: Promise<boolean> | undefined
+
+  const takeLock = async () => {
     if (await isHeldHere()) {
       return true
     }
@@ -106,13 +109,23 @@ const createMutex = (params: { getOptions: () => PoolOptions; name: string; retr
 
     return held
   }
+  // One attempt at a time, so that concurrent calls do not take the reentrant lock of MySQL twice.
+  const tryLock = () => {
+    pending ??= takeLock().finally(() => {
+      pending = undefined
+    })
+
+    return pending
+  }
 
   return {
     tryLock,
 
-    async lock() {
+    async lock(signal) {
+      signal?.throwIfAborted()
+
       while (!(await tryLock())) {
-        await setTimeout(retryEvery.ms)
+        await setTimeout(retryEvery.ms, undefined, { signal })
       }
     },
 

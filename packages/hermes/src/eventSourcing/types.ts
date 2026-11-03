@@ -128,7 +128,7 @@ type CommandHandlerParams<State, C extends Command, E extends Event, Tx> = {
 type HandleOptions<Tx> = {
   /** Check this version instead of the version the state was loaded at. A conflict is then never retried. */
   expectedVersion?: ExpectedVersion
-  /** The transaction of the application. */
+  /** The transaction of the application. A version conflict in it is not retried: retry the whole transaction. */
   tx?: Tx
   /** Stops the command, also while it waits for a retry (rejects with `AbortError`). */
   signal?: AbortSignal

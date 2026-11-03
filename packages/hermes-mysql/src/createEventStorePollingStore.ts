@@ -23,9 +23,6 @@ type EventStorePollingStore = PartitionClaimingStore<RecordedEvent> & {
 
 const microseconds = (duration: Duration) => Math.round(duration.ms * 1000)
 
-const chunksOf = <T>(items: T[], size: number) =>
-  Array.from({ length: Math.ceil(items.length / size) }, (_, i) => items.slice(i * size, (i + 1) * size))
-
 /**
  * Creates the store of the event store for `createPollingOutbox` with `usePartitionOrderingPolicy`: a partition is a
  * stream, so the events of a stream are published one by one, in their order, by one instance at a time.
@@ -47,6 +44,8 @@ const createEventStorePollingStore = (
   scope: EventStorePollingStoreScope,
 ): EventStorePollingStore => {
   const { consumerName } = scope
+  // Where the next poll starts looking for changed streams, so that every stream gets its turn.
+  let cursor: string | undefined
 
   const registerNewStreams = async (pool: Pool) => {
     const [missing] = await pool.query<RowDataPacket[]>(
@@ -81,13 +80,23 @@ const createEventStorePollingStore = (
         return
       }
 
-      const [streams] = await pool.query<RowDataPacket[]>(`SELECT \`stream_id\`, \`version\` FROM \`${StreamsTable}\``)
+      // page through the streams by their primary key, so that a big event store does not land in memory at once
+      for (let after = ''; ;) {
+        const [streams] = await pool.query<RowDataPacket[]>(
+          `SELECT \`stream_id\`, \`version\` FROM \`${StreamsTable}\`
+           WHERE \`stream_id\` > ? ORDER BY \`stream_id\` LIMIT ?`,
+          [after, MaxRowsPerStatement],
+        )
 
-      for (const chunk of chunksOf(streams, MaxRowsPerStatement)) {
+        if (!streams.length) {
+          break
+        }
+
         await pool.query(
           `INSERT IGNORE INTO \`${SubscriptionsTable}\` (\`consumer_name\`, \`stream_id\`, \`version\`) VALUES ?`,
-          [chunk.map((row) => [consumerName, String(row.stream_id), String(row.version)])],
+          [streams.map((row) => [consumerName, String(row.stream_id), String(row.version)])],
         )
+        after = String(streams[streams.length - 1].stream_id)
       }
 
       await pool.query(
@@ -101,8 +110,21 @@ const createEventStorePollingStore = (
 
       await registerNewStreams(pool)
 
-      const { text, params } = changedStreamsQuery({ consumerName, limit, owner })
-      const [changed] = await pool.query<RowDataPacket[]>(text, params)
+      const find = async (after: string | undefined, max: number) => {
+        const { text, params } = changedStreamsQuery({ consumerName, limit: max, owner, after })
+        const [rows] = await pool.query<RowDataPacket[]>(text, params)
+
+        return rows.map((row) => String(row.stream_id))
+      }
+      const fromCursor = await find(cursor, limit)
+      // wrap around: the streams before the cursor, without those already found
+      const wrapped =
+        cursor !== undefined && fromCursor.length < limit
+          ? (await find(undefined, limit)).filter((id) => id <= cursor! && !fromCursor.includes(id))
+          : []
+      const changed = [...fromCursor, ...wrapped].slice(0, limit)
+
+      cursor = changed.length ? changed[changed.length - 1] : undefined
 
       if (!changed.length) {
         return []
@@ -117,7 +139,7 @@ const createEventStorePollingStore = (
                AND (\`owner\` = ? OR \`lease_until\` IS NULL OR \`lease_until\` < NOW(6))
                AND (\`retry_at\` IS NULL OR \`retry_at\` <= NOW(6))
              FOR UPDATE SKIP LOCKED`,
-            [consumerName, changed.map((row) => String(row.stream_id)), owner],
+            [consumerName, changed, owner],
           )
           const streamIds = rows.map((row) => String(row.stream_id))
 
@@ -169,6 +191,8 @@ const createEventStorePollingStore = (
       }))
     },
 
+    // No check of the claim, on purpose: the event is already published, whoever published it, and `GREATEST` never
+    // moves the checkpoint back, so a late call of an instance that lost its claim is harmless.
     async markDelivered(message) {
       await retryOnLockWaitTimeout(() =>
         getPool().query(

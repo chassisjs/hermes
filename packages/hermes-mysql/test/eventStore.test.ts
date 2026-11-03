@@ -1490,3 +1490,169 @@ describe('Mutex', () => {
     })
   })
 })
+
+describe('Transactions of the application', () => {
+  const inlineCounter = defineHermesProjection<{ count: number }, SchedulingEvent>()
+    .ofName('inlineCounter')
+    .ofDocumentType()
+    .ofEvents('OccurrenceScheduled', 'OccurrenceBecameDueNow', 'TaskCompleted', 'NoteAdded')
+    .ofInitialState(() => ({ count: 0 }))
+    .ofEvolve((state) => ({ count: state.count + 1 }))
+    .ofId(() => 'all')
+    .inline()
+    .done()
+
+  test('an append whose snapshot is older than the documents of its stream updates them', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool, { eventStore: true })
+      const eventStore = createEventStore(pool, { projections: [occurrences, inlineCounter] })
+      const app = await pool.getConnection()
+
+      try {
+        // REPEATABLE READ, with the snapshot taken before the other append commits
+        await app.query('START TRANSACTION WITH CONSISTENT SNAPSHOT')
+        await eventStore.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', FUTURE)])
+
+        await expect(eventStore.appendToStream<SchedulingEvent>('task-1', [note('a')], { tx: app })).resolves.toEqual({
+          nextVersion: 2n,
+          createdNewStream: false,
+        })
+        await app.commit()
+      } finally {
+        app.release()
+      }
+
+      expect(await eventStore.readProjection(occurrences, 'task-1')).toEqual({
+        data: { status: 'scheduled', occurrenceId: 'o-1', dueAt: FUTURE },
+        version: 2n,
+      })
+      expect(await eventStore.readProjection(inlineCounter, 'all')).toMatchObject({ data: { count: 2 } })
+    })
+  })
+
+  test('a version conflict in a transaction of the application is not retried', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      const eventStore = await setUp(pool)
+      const decide = jest.fn(scheduling.decide)
+      const handle = createCommandHandler({
+        decider: { ...scheduling, decide },
+        eventStore,
+        loadState: fromInlineProjection(eventStore, occurrences),
+        retry: { attempts: 3 },
+      })
+
+      await handle('task-1', schedule('o-1', NOW, PAST))
+      decide.mockClear()
+
+      const inTransaction = async () => {
+        const app = await pool.getConnection()
+
+        try {
+          await app.beginTransaction()
+          const result = await handle('task-1', complete('o-1'), { tx: app })
+          await app.commit()
+
+          return result
+        } catch (error) {
+          await app.rollback()
+          throw error
+        } finally {
+          app.release()
+        }
+      }
+
+      const results = await Promise.allSettled([inTransaction(), inTransaction()])
+
+      expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+      results
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .forEach(({ reason }) => expect(reason).toBeInstanceOf(VersionConflictError))
+      expect(decide).toHaveBeenCalledTimes(2)
+    })
+  })
+})
+
+describe('A projection added to a running application', () => {
+  test('a state-stored decider sees the events appended before the projection existed', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool, { eventStore: true })
+      await createEventStore(pool).appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', PAST)])
+
+      const eventStore = createEventStore(pool, { projections: [occurrences] })
+      const handle = createCommandHandler({
+        decider: scheduling,
+        eventStore,
+        loadState: fromInlineProjection(eventStore, occurrences),
+      })
+
+      // with an empty state, completing would be rejected: there would be no open occurrence
+      const { newEvents, nextVersion } = await handle('task-1', complete('o-1'))
+
+      expect(newEvents.map(({ type }) => type)).toEqual(['TaskCompleted'])
+      expect(nextVersion).toBe(2n)
+      // the document is built from all the events of the stream
+      expect(await eventStore.readProjection(occurrences, 'task-1')).toEqual({
+        data: { status: 'completed', occurrenceId: 'o-1', dueAt: PAST },
+        version: 2n,
+      })
+    })
+  })
+})
+
+describe('Fairness', () => {
+  test('a busy stream does not starve the others', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const published: HermesEventEnvelope<SchedulingEvent>[] = []
+      let busy = true
+
+      onDispose(
+        await createEventStoreConsumer<SchedulingEvent>({
+          getOptions: () => options,
+          consumerName: 'relay',
+          publish: (event) => void published.push(event),
+          pollInterval: Duration.ofMiliseconds(20),
+          maxPartitions: 1,
+          batchSize: 1,
+        }).start(),
+      )
+
+      const appending = (async () => {
+        for (let i = 0; busy; i++) {
+          await eventStore.appendToStream<SchedulingEvent>('a-busy', [note(`${i}`)])
+        }
+      })()
+
+      try {
+        await waitUntil(() => published.length > 5)
+        await eventStore.appendToStream<SchedulingEvent>('z-quiet', [note('one')])
+        await waitUntil(() => published.some(({ streamId }) => streamId === 'z-quiet'), Duration.ofSeconds(5))
+      } finally {
+        busy = false
+        await appending
+      }
+    })
+  })
+})
+
+describe('Mutex, cancellation', () => {
+  test('lock() stops waiting when its signal aborts', async () => {
+    await mysql.withDatabase(async ({ options, onDispose }) => {
+      const first = createMutex({ getOptions: () => options, name: 'scheduling-tick' })
+      const second = createMutex({
+        getOptions: () => options,
+        name: 'scheduling-tick',
+        retryEvery: Duration.ofSeconds(10),
+      })
+      onDispose(() => first.unlock())
+      onDispose(() => second.unlock())
+      const controller = new AbortController()
+
+      await first.lock()
+      const waiting = second.lock(controller.signal)
+      setTimeout(50).then(() => controller.abort())
+
+      await expect(waiting).rejects.toMatchObject({ name: 'AbortError' })
+    })
+  })
+})

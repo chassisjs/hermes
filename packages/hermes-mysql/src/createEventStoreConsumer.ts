@@ -189,7 +189,7 @@ const createProjectionConsumer = (params: ProjectionConsumerParams): EventStoreC
           await inTransaction(
             getPool(),
             async (connection) => {
-              await applyToProjection(connection, params.projection, [event])
+              await applyToProjection(connection, params.projection, [event], { readCommitted: true })
               await connection.query(
                 `UPDATE \`${SubscriptionsTable}\`
                  SET \`attempts\` = 0, \`retry_at\` = NULL, \`version\` = GREATEST(\`version\`, CAST(? AS UNSIGNED))

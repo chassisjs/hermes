@@ -29,6 +29,9 @@ const fromEvents =
  * With `retry`, a version conflict loads the fresh state and decides again, after the `delay` of the retry policy.
  * A conflict is never retried when the caller gives its own `expectedVersion`, and no other error is retried.
  *
+ * A conflict is not retried in a transaction of the application (`tx`) either: in `REPEATABLE READ` a retry would read
+ * the same snapshot again and conflict again. Retry the whole transaction of the application instead.
+ *
  * @example
  * ```typescript
  * const handle = createCommandHandler({
@@ -72,7 +75,12 @@ const createCommandHandler = <State, C extends Command, E extends Event, Tx = ne
 
         return { newEvents, newState: newEvents.reduce(decider.evolve, state), nextVersion, createdNewStream }
       } catch (error) {
-        if (!(error instanceof VersionConflictError) || callerVersion !== undefined || attempt >= attempts) {
+        if (
+          !(error instanceof VersionConflictError) ||
+          callerVersion !== undefined ||
+          options?.tx !== undefined ||
+          attempt >= attempts
+        ) {
           throw error
         }
       }

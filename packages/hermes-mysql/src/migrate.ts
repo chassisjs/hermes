@@ -125,7 +125,6 @@ const applyMigrations = async (connection: PoolConnection, table: string, track:
  * `createOutboxConsumer` runs it on `start()`. Call it yourself when you turn that off (`migrate: false`), e.g. in a
  * deployment pipeline with a user that can change the schema.
  *
- * @param pool - A `mysql2` pool
  * With `eventStore`, it also creates the tables of the event store (`hermes_streams`, `hermes_events`,
  * `hermes_subscriptions`, `hermes_projections`, `hermes_projection_versions`), whose versions are kept apart in
  * `hermes_event_store_migrations`. The event store is opt-in, so an application that uses only the outbox does not

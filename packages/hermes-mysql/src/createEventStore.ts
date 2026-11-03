@@ -1,4 +1,5 @@
 import {
+  applyProjection,
   assert,
   assertExpectedVersion,
   type Event,
@@ -10,7 +11,16 @@ import {
 import { randomUUID } from 'node:crypto'
 import { type Pool, type RowDataPacket } from 'mysql2/promise'
 import { DeadlockErrno, DuplicateEntryErrno, EventsTable, StreamsTable } from './eventStoreSql.js'
-import { applyToProjection, readDocument, toBigInt, type AnyProjection, type Queryable } from './projections.js'
+import {
+  applyToProjection,
+  EventColumns,
+  readDocument,
+  toBigInt,
+  toRecordedEvent,
+  type AnyProjection,
+  type EventRow,
+  type Queryable,
+} from './projections.js'
 import { inTransaction, insertStatements } from './sql.js'
 
 /**
@@ -35,57 +45,46 @@ type MySqlEventStore = EventStore<EventStoreTransaction> & {
   readStreamVersion(streamId: string, options?: { tx?: EventStoreTransaction }): Promise<bigint>
 }
 
-type EventRow = RowDataPacket & {
-  stream_id: string
-  stream_position: string | number
-  event_id: string
-  type: string
-  data: unknown
-  metadata: unknown
-  recorded_at: Date
-}
-
 const OwnTransactionAttempts = 5
 const Savepoint = 'hermes_append'
 
 const errnoOf = (error: unknown) => (error as { errno?: number }).errno
 
-const toRecordedEvent = (row: EventRow) =>
-  ({
-    type: row.type,
-    data: row.data,
-    metadata: row.metadata ?? {},
-    streamId: row.stream_id,
-    streamPosition: toBigInt(row.stream_position),
-    eventId: row.event_id,
-    recordedAt: row.recorded_at,
-  }) as RecordedEvent
-
 /**
  * Locks the row of a stream until the end of the transaction and returns its version, creating the row (at version 0)
  * when the stream does not exist.
  *
- * It looks for the row with a plain `SELECT` first, so that a missing stream is created with an `INSERT`, which locks
- * only the new row, instead of a locking read of a missing row, which in `REPEATABLE READ` locks the gap where other
- * streams would be created.
+ * In its own transaction (`READ COMMITTED`), `INSERT ... ON DUPLICATE KEY UPDATE` takes the exclusive lock at once, so
+ * appends that create the same stream at the same time do not deadlock on an upgrade of a shared lock.
+ *
+ * In a transaction of the application, it looks for the row with a plain `SELECT` first, so that a missing stream is
+ * created with an `INSERT`, which locks only the new row, instead of a locking read of a missing row, which in
+ * `REPEATABLE READ` locks the gap where other streams would be created.
  */
-const lockStream = async (ex: Queryable, streamId: string) => {
-  const [found] = await ex.query<RowDataPacket[]>(`SELECT 1 FROM \`${StreamsTable}\` WHERE \`stream_id\` = ?`, [
-    streamId,
-  ])
+const lockStream = async (ex: Queryable, streamId: string, readCommitted: boolean) => {
+  if (readCommitted) {
+    await ex.query(
+      `INSERT INTO \`${StreamsTable}\` (\`stream_id\`, \`version\`) VALUES (?, 0)
+       ON DUPLICATE KEY UPDATE \`stream_id\` = \`stream_id\``,
+      [streamId],
+    )
+  } else {
+    const [found] = await ex.query<RowDataPacket[]>(`SELECT 1 FROM \`${StreamsTable}\` WHERE \`stream_id\` = ?`, [
+      streamId,
+    ])
 
-  if (!found.length) {
-    try {
-      await ex.query(`INSERT INTO \`${StreamsTable}\` (\`stream_id\`, \`version\`) VALUES (?, 0)`, [streamId])
+    if (!found.length) {
+      try {
+        await ex.query(`INSERT INTO \`${StreamsTable}\` (\`stream_id\`, \`version\`) VALUES (?, 0)`, [streamId])
 
-      return 0n
-    } catch (error) {
-      if (errnoOf(error) !== DuplicateEntryErrno) {
-        throw error
+        return 0n
+      } catch (error) {
+        if (errnoOf(error) !== DuplicateEntryErrno) {
+          throw error
+        }
       }
     }
   }
-
   const [[row]] = await ex.query<RowDataPacket[]>(
     `SELECT \`version\` FROM \`${StreamsTable}\` WHERE \`stream_id\` = ? FOR UPDATE`,
     [streamId],
@@ -101,7 +100,15 @@ const lockStream = async (ex: Queryable, streamId: string) => {
  * version, stores the events with the next positions and updates the inline projections, all in one transaction:
  * its own, in `READ COMMITTED`, or the one of the application (`tx`). In the transaction of the application, the
  * append runs inside a savepoint, so a rejected append (e.g. a {@link VersionConflictError}) leaves nothing behind
- * and the transaction stays usable. Appends to different streams do not wait for each other.
+ * and the transaction stays usable. Appends to different streams do not wait for each other, with one exception: an
+ * inline projection whose document is fed by many streams (`ofId`) locks that document in every append that feeds it,
+ * until the end of its transaction.
+ *
+ * Every event gets a new `eventId` (a UUID); an id given by the caller is not used. For idempotent appends, use the
+ * expected version.
+ *
+ * Every document of a projection keeps a row per stream that fed it in `hermes_projection_versions`, and the rows are
+ * never removed: a document fed by a million streams has a million rows there.
  *
  * Its own transaction is tried again when MySQL picks it as the victim of a deadlock (e.g. when many instances create
  * the same stream at once). A deadlock in the transaction of the application rolls back the whole transaction, so it
@@ -125,11 +132,12 @@ const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] 
     streamId: string,
     events: Event[],
     expectedVersion: Parameters<typeof assertExpectedVersion>[1],
+    readCommitted: boolean,
   ) => {
     await ex.query(`SAVEPOINT ${Savepoint}`)
 
     try {
-      const currentVersion = await lockStream(ex, streamId)
+      const currentVersion = await lockStream(ex, streamId, readCommitted)
 
       assertExpectedVersion(streamId, expectedVersion, currentVersion)
 
@@ -178,7 +186,7 @@ const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] 
       ])
 
       for (const projection of inline) {
-        await applyToProjection(ex, projection, recorded)
+        await applyToProjection(ex, projection, recorded, { readCommitted })
       }
 
       await ex.query(`RELEASE SAVEPOINT ${Savepoint}`)
@@ -207,18 +215,22 @@ const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] 
       const ex = options?.tx ?? pool
       const currentVersion = await readStreamVersion(streamId, ex)
       const [rows] = await ex.query<EventRow[]>(
-        `SELECT \`stream_id\`, \`stream_position\`, \`event_id\`, \`type\`, \`data\`, \`metadata\`, \`recorded_at\`
+        `SELECT ${EventColumns}
          FROM \`${EventsTable}\`
          WHERE \`stream_id\` = ? AND \`stream_position\` > ?
          ORDER BY \`stream_position\``,
         [streamId, (options?.after ?? 0n).toString()],
       )
 
-      return {
-        events: rows.map(toRecordedEvent) as RecordedEvent<E>[],
-        currentVersion,
-        streamExists: currentVersion > 0n,
-      }
+      const events = rows.map(toRecordedEvent) as RecordedEvent<E>[]
+      // Without `tx`, the version and the events may come from different connections: an append that commits in
+      // between adds events above the version, so the version is the last of them.
+      const version =
+        events.length && events[events.length - 1].streamPosition > currentVersion
+          ? events[events.length - 1].streamPosition
+          : currentVersion
+
+      return { events, currentVersion: version, streamExists: version > 0n }
     },
 
     async appendToStream(streamId, events, options) {
@@ -231,14 +243,18 @@ const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] 
       const expectedVersion = options?.expectedVersion ?? 'any'
 
       if (options?.tx) {
-        return append(options.tx, streamId, events, expectedVersion)
+        return append(options.tx, streamId, events, expectedVersion, false)
       }
 
       for (let attempt = 1; ; attempt++) {
         try {
-          return await inTransaction(pool, (connection) => append(connection, streamId, events, expectedVersion), {
-            readCommitted: true,
-          })
+          return await inTransaction(
+            pool,
+            (connection) => append(connection, streamId, events, expectedVersion, true),
+            {
+              readCommitted: true,
+            },
+          )
         } catch (error) {
           if (errnoOf(error) !== DeadlockErrno || attempt >= OwnTransactionAttempts) {
             throw error
@@ -256,7 +272,11 @@ const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] 
 
 /**
  * Loads the state of a stream from the document of a single-stream inline projection (state-stored), with the
- * version of the stream it was updated at. A stream without a document has the initial state.
+ * version of the stream it was updated at.
+ *
+ * A stream with events but without a document (e.g. the projection was added to a running application, and nothing
+ * was appended to the stream since) gets its state folded from its events through the projection, so the decider
+ * never decides on an empty state. The next append writes the document from all the events of the stream.
  *
  * The projection has to apply the same events as the `evolve` of the decider, e.g. `.ofEvolve(decider.evolve)`.
  */
@@ -270,9 +290,16 @@ const fromInlineProjection = <State, E extends Event>(
   return async ({ streamId, tx }) => {
     const document = await eventStore.readProjection(projection, streamId, { tx })
 
-    return document
-      ? { state: document.data, version: document.version ?? 0n }
-      : { state: projection.initialState(), version: await eventStore.readStreamVersion(streamId, { tx }) }
+    if (document) {
+      return { state: document.data, version: document.version ?? 0n }
+    }
+
+    const { events, currentVersion } = await eventStore.readStream<E>(streamId, { tx })
+
+    return {
+      state: events.length ? applyProjection(projection, null, events) : projection.initialState(),
+      version: currentVersion,
+    }
   }
 }
 

@@ -76,23 +76,32 @@ const eventStoreMigrations = [
  * The query that finds the streams with events that a consumer has not processed yet, and that it can claim now: not
  * claimed by another instance (or the claim expired), and not waiting for the retry of a failed event.
  *
- * It reads the rows of the consumer in `hermes_subscriptions` by the prefix of the primary key and joins every stream
- * by its primary key, so its cost grows with the number of streams that the consumer knows, without a sort.
+ * It reads the rows of the consumer in `hermes_subscriptions` in the order of the primary key, from `after` on, and
+ * joins every stream by its primary key, so it needs no sort, and its cost grows with the number of streams that the
+ * consumer knows. The caller moves `after` past the streams it got and wraps around at the end, so busy streams at the
+ * beginning of the key order do not starve the others.
  *
  * @param params.consumerName - The consumer
  * @param params.limit - The maximum number of streams
  * @param params.owner - The instance that claims; the streams it already claims are included
+ * @param params.after - Only the streams after this one, in the order of their ids
  */
-const changedStreamsQuery = (params: { consumerName: string; limit: number; owner?: string }) => ({
+const changedStreamsQuery = (params: { consumerName: string; limit: number; owner?: string; after?: string }) => ({
   text: `SELECT sub.\`stream_id\`
     FROM \`${SubscriptionsTable}\` sub
     JOIN \`${StreamsTable}\` s ON s.\`stream_id\` = sub.\`stream_id\`
-    WHERE sub.\`consumer_name\` = ?
+    WHERE sub.\`consumer_name\` = ?${params.after === undefined ? '' : ' AND sub.`stream_id` > ?'}
       AND s.\`version\` > sub.\`version\`
       AND (${params.owner === undefined ? '' : 'sub.`owner` = ? OR '}sub.\`lease_until\` IS NULL OR sub.\`lease_until\` < NOW(6))
       AND (sub.\`retry_at\` IS NULL OR sub.\`retry_at\` <= NOW(6))
+    ORDER BY sub.\`stream_id\`
     LIMIT ?`,
-  params: [params.consumerName, ...(params.owner === undefined ? [] : [params.owner]), params.limit] as unknown[],
+  params: [
+    params.consumerName,
+    ...(params.after === undefined ? [] : [params.after]),
+    ...(params.owner === undefined ? [] : [params.owner]),
+    params.limit,
+  ] as unknown[],
 })
 
 export {
