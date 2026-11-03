@@ -632,6 +632,18 @@ describe('Review fixes', () => {
     })
   })
 
+  test('a start that fails on invalid options can be tried again and leaves no pool open', async () => {
+    await mysql.withDatabase(async ({ options }) => {
+      const outbox = createConsumer(options, () => {}, { maxPartitions: 0 })
+
+      await expect(outbox.start()).rejects.toThrow(/maxPartitions|partitions/i)
+      await expect(outbox.start()).rejects.not.toThrow(/already started/)
+      await expect(createConsumer(options, () => {}, { pollingConnectionLimit: 0 }).start()).rejects.toThrow(
+        /positive integer/,
+      )
+    })
+  })
+
   test('with partition ordering, a failure reported by an instance that lost the partition is ignored', async () => {
     await mysql.withDatabase(async ({ options, pool, onDispose }) => {
       const outbox = createConsumer(options, () => {})

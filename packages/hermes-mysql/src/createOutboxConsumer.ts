@@ -64,44 +64,45 @@ const createOutboxConsumer = <Message extends JSONValue>(
     async start() {
       assert(!isStarted, 'The outbox consumer is already started.')
 
-      isStarted = true
-
       const pollingPool = createPollingPool(params.getOptions(), params.pollingConnectionLimit)
+      let stopPolling: () => Promise<void>
+
+      isStarted = true
 
       try {
         if (params.migrate !== false) {
           await migrate(pollingPool)
         }
+
+        const store = createPollingStore<Message>(() => pollingPool, { consumerName, partitionKey })
+        stopPolling = createPollingOutbox<Message>({
+          policy:
+            params.ordering === 'none'
+              ? useNoOrderingPolicy(store)
+              : usePartitionOrderingPolicy(store, { maxPartitions: params.maxPartitions }),
+          publish: async (message) => {
+            await params.publish({
+              position: String(message.id),
+              partitionKey: message.partitionKey,
+              messageId: message.messageId,
+              messageType: message.messageType,
+              redeliveryCount: message.attempts,
+              message: message.message,
+            })
+          },
+          pollInterval: params.pollInterval,
+          batchSize: params.batchSize,
+          lease: params.lease,
+          retry: params.retry,
+          onFailedPublish: params.onFailedPublish,
+          onDbError: params.onDbError,
+        }).start()
       } catch (error) {
         isStarted = false
         await pollingPool.end().catch(() => {})
 
         throw error
       }
-
-      const store = createPollingStore<Message>(() => pollingPool, { consumerName, partitionKey })
-      const stopPolling = createPollingOutbox<Message>({
-        policy:
-          params.ordering === 'none'
-            ? useNoOrderingPolicy(store)
-            : usePartitionOrderingPolicy(store, { maxPartitions: params.maxPartitions }),
-        publish: async (message) => {
-          await params.publish({
-            position: String(message.id),
-            partitionKey: message.partitionKey,
-            messageId: message.messageId,
-            messageType: message.messageType,
-            redeliveryCount: message.attempts,
-            message: message.message,
-          })
-        },
-        pollInterval: params.pollInterval,
-        batchSize: params.batchSize,
-        lease: params.lease,
-        retry: params.retry,
-        onFailedPublish: params.onFailedPublish,
-        onDbError: params.onDbError,
-      }).start()
 
       let stopping: Promise<void> | undefined
 

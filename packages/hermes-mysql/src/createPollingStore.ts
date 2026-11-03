@@ -51,6 +51,9 @@ const microseconds = (duration: Duration) => Math.round(duration.ms * 1000)
  * `markFailed` changes a message only when `owner` still has the claim of the message, or of its partition when the
  * message itself is not claimed (`usePartitionOrderingPolicy`).
  *
+ * `markDelivered` does not check the claim on purpose: the message is already published, so it is delivered whoever
+ * published it. Checking the claim would only leave a published message undelivered, to be published again.
+ *
  * @param getPool - Returns the `mysql2` pool, preferably of {@link createPollingPool}
  * @param scope - The consumer and, optionally, the partition whose messages the store reads
  */

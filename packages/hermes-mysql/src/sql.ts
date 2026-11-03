@@ -1,3 +1,4 @@
+import { assert } from '@chassisjs/hermes'
 import { createPool } from 'mysql2'
 import { type Pool, type PoolConnection, type PoolOptions } from 'mysql2/promise'
 import { type QueryExecutor } from './types.js'
@@ -19,15 +20,24 @@ const PollingProgramName = 'hermes-polling'
  * outbox tries again at the next poll.
  *
  * Keep it apart from the pool of the application, so the isolation level of the application does not change. Hermes
- * needs only a few connections, so the pool has at most `connectionLimit` of them.
+ * needs only a few connections, so the pool has at most `connectionLimit` of them, and the statements wait in a queue
+ * for a free connection (`waitForConnections` and `queueLimit` of `options` are ignored). The statements are short, so
+ * a few connections serve many partitions published at the same time.
  *
  * @param options - The options of the `mysql2` pool
  * @param connectionLimit - The maximum number of connections of the pool
  */
 const createPollingPool = (options: PoolOptions, connectionLimit = DefaultPollingConnectionLimit): Pool => {
+  assert(
+    Number.isInteger(connectionLimit) && connectionLimit > 0,
+    'The connection limit of the polling pool has to be a positive integer.',
+  )
+
   const pool = createPool({
     ...options,
     connectionLimit,
+    waitForConnections: true,
+    queueLimit: 0,
     maxIdle: connectionLimit,
     resetOnRelease: false,
     supportBigNumbers: true,
