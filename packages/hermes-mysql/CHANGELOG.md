@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# Unreleased
+
+### Features
+
+- `createReactionConsumer`: runs a reaction (`defineHermesReaction` / `reactOn` of `@chassisjs/hermes`) on the events it handles, one by one per stream, in their order, by one instance at a time. The handler and the checkpoint share one transaction (`READ COMMITTED`), so what the handler does in `tx`, e.g. an append to a stream of another module, is done once; work outside of `tx` is done at least once. A failing handler rolls back and is retried; the events after it in its stream wait. The events the reaction does not handle only move its checkpoint, without a transaction.
+- Dead letters of reactions: with `maxAttempts`, the last failing attempt writes the event to `hermes_dead_letters` (consumer, stream, position, event id and type, attempts, error) and skips it, in the transaction that moves the checkpoint. `onGiveUp(event, error, { tx })` runs in that transaction too: return to go on with the next events, or throw to keep the stream waiting (nothing is written, and the handler is retried) until the bug is fixed. Without `maxAttempts`, a failing event is retried forever, as before.
+- Event store migration 2 adds `hermes_dead_letters`.
+
 # [1.0.0-alpha.23](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.22...v1.0.0-alpha.23) (2026-11-03)
 
 `1.0.0-alpha.22` shipped the first version of the event store without an entry here; this section covers both. It needs `@chassisjs/hermes` `~1.0.0-alpha.23`.

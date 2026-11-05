@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# Unreleased
+
+### Features
+
+- **Reactions** (`defineHermesReaction`, alias `reactOn`): a fluent builder of a reaction to events, e.g. so that one module reacts to the events of another one. The handler gets only the events listed in `ofEvents`, and the transaction of the event store (`tx`) that moves the checkpoint of the reaction, so that its work commits together with the checkpoint.
+
 # [1.0.0-alpha.23](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.22...v1.0.0-alpha.23) (2026-11-03)
 
 `1.0.0-alpha.22` shipped the first version of the event sourcing API without an entry here; this section covers both.

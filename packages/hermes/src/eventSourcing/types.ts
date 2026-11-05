@@ -176,6 +176,36 @@ type HermesProjection<State, E extends Event = Event> = Readonly<{
   '~types'?: { state: State; event: E }
 }>
 
+/**
+ * What a reaction gets besides the event.
+ *
+ * @template Tx - The transaction of the event store
+ */
+type ReactionContext<Tx = unknown> = Readonly<{
+  /**
+   * The transaction that moves the checkpoint of the reaction past the event. Do the work of the reaction in it, e.g.
+   * append the events of another module, so that the work and the checkpoint commit together, or not at all.
+   */
+  tx: Tx
+}>
+
+/**
+ * A reaction to events, e.g. of one module to the events of another one.
+ *
+ * @template E - The events of the reaction
+ * @template Tx - The transaction of the event store
+ */
+type HermesReaction<E extends Event = Event, Tx = unknown> = Readonly<{
+  name: string
+  kind: 'reaction'
+  eventTypes: readonly E['type'][]
+  canHandle(event: { type: string }): boolean
+  /** Reacts to a handled event. Throw to react to it again later; the events after it in its stream wait. */
+  handle(event: RecordedEvent<E>, context: ReactionContext<Tx>): Promise<void> | void
+  /** Never set: carries the types of the events and of the transaction, so that functions can infer them. */
+  '~types'?: { event: E; tx: Tx }
+}>
+
 export type {
   AppendOptions,
   AppendResult,
@@ -188,7 +218,9 @@ export type {
   ExpectedVersion,
   HandleOptions,
   HermesProjection,
+  HermesReaction,
   ProjectionMode,
+  ReactionContext,
   ReadStreamOptions,
   ReadStreamResult,
   RecordedEvent,

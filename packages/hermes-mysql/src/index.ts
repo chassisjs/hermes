@@ -22,10 +22,12 @@ export {
 export {
   createEventStoreConsumer,
   createProjectionConsumer,
+  createReactionConsumer,
   type EventStoreConsumer,
   type EventStoreConsumerParams,
   type HermesEventEnvelope,
   type ProjectionConsumerParams,
+  type ReactionConsumerParams,
 } from './createEventStoreConsumer.js'
 export {
   createEventStorePollingStore,

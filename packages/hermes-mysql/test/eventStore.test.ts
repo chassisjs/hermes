@@ -1,8 +1,10 @@
 import {
   createCommandHandler,
   defineHermesProjection,
+  defineHermesReaction,
   Duration,
   type HermesProjection,
+  type RecordedEvent,
   VersionConflictError,
 } from '@chassisjs/hermes'
 import { afterAll, beforeAll, describe, expect, jest, test } from '@jest/globals'
@@ -13,6 +15,8 @@ import {
   createEventStoreConsumer,
   createMutex,
   createProjectionConsumer,
+  createReactionConsumer,
+  type EventStoreTransaction,
   fromInlineProjection,
   type HermesEventEnvelope,
   migrate,
@@ -134,6 +138,7 @@ describe('Migrations', () => {
       // the result lists the versions of the outbox, as before; the event store has its own table of versions
       expect(await migrate(pool, { eventStore: true })).toEqual([])
       expect(await tables()).toEqual([
+        'hermes_dead_letters',
         'hermes_event_store_migrations',
         'hermes_events',
         'hermes_migrations',
@@ -146,6 +151,7 @@ describe('Migrations', () => {
       ])
       expect(await select(pool, 'SELECT `version`, `name` FROM `hermes_event_store_migrations`')).toEqual([
         { version: 1, name: 'create the event store' },
+        { version: 2, name: 'create the dead letters of the consumers' },
       ])
       expect(await select(pool, 'SELECT `version` FROM `hermes_migrations`')).toEqual([{ version: 1 }])
     })
@@ -159,7 +165,10 @@ describe('Migrations', () => {
         migrate(pool, { eventStore: true }),
       ])
 
-      expect(await select(pool, 'SELECT `version` FROM `hermes_event_store_migrations`')).toEqual([{ version: 1 }])
+      expect(await select(pool, 'SELECT `version` FROM `hermes_event_store_migrations`')).toEqual([
+        { version: 1 },
+        { version: 2 },
+      ])
       expect(await select(pool, 'SELECT `version` FROM `hermes_migrations`')).toEqual([{ version: 1 }])
     })
   })
@@ -173,7 +182,7 @@ describe('Migrations', () => {
       }).start()
       await stop()
 
-      expect(await count(pool, 'SELECT COUNT(*) AS n FROM `hermes_event_store_migrations`')).toBe(1)
+      expect(await count(pool, 'SELECT COUNT(*) AS n FROM `hermes_event_store_migrations`')).toBe(2)
     })
   })
 })
@@ -1374,6 +1383,283 @@ describe('Async projections', () => {
 
       expect(await eventStore.readProjection(openOccurrences, 'task-1')).toBeNull()
     })
+  })
+})
+
+describe('Reactions', () => {
+  type Billing = { type: 'InvoiceIssued'; data: { occurrenceId: string } }
+
+  const reactionCheckpoint = (pool: Pool, name: string, streamId: string) =>
+    count(pool, 'SELECT `version` AS n FROM `hermes_subscriptions` WHERE `consumer_name` = ? AND `stream_id` = ?', [
+      `reaction:${name}`,
+      streamId,
+    ])
+
+  test('reacts to the handled events by appending to another stream in the same transaction', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const handled: string[] = []
+      const issueInvoice = defineHermesReaction<SchedulingEvent, EventStoreTransaction>()
+        .ofName('billing:issue-invoice')
+        .ofEvents('TaskCompleted')
+        .ofHandler(async (event, { tx }) => {
+          handled.push(`${event.streamId}:${event.streamPosition}`)
+          await eventStore.appendToStream<Billing>(
+            `invoice-${event.data.occurrenceId}`,
+            [{ type: 'InvoiceIssued', data: { occurrenceId: event.data.occurrenceId } }],
+            { expectedVersion: 'no_stream', tx },
+          )
+        })
+        .done()
+
+      onDispose(
+        await createReactionConsumer({
+          getOptions: () => options,
+          reaction: issueInvoice,
+          pollInterval: Duration.ofMiliseconds(50),
+        }).start(),
+      )
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [
+        note('a'),
+        scheduled('o-1', FUTURE),
+        completed('o-1'),
+      ])
+      await eventStore.appendToStream<SchedulingEvent>('task-2', [completed('o-2')])
+
+      await waitUntil(async () => (await reactionCheckpoint(pool, 'billing:issue-invoice', 'task-1')) === 3)
+      await waitUntil(async () => (await reactionCheckpoint(pool, 'billing:issue-invoice', 'task-2')) === 1)
+
+      expect(handled.sort()).toEqual(['task-1:3', 'task-2:1'])
+      expect((await eventStore.readStream<Billing>('invoice-o-1')).events.map(({ type }) => type)).toEqual([
+        'InvoiceIssued',
+      ])
+      expect((await eventStore.readStream<Billing>('invoice-o-2')).currentVersion).toBe(1n)
+    })
+  })
+
+  test('a failing handler rolls back what it did in the transaction, and is retried', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      let failures = 1
+      const onFailedPublish = jest.fn()
+      const issueInvoice = defineHermesReaction<SchedulingEvent, EventStoreTransaction>()
+        .ofName('billing:flaky')
+        .ofEvents('TaskCompleted')
+        .ofHandler(async (event, { tx }) => {
+          await eventStore.appendToStream<Billing>(
+            `invoice-${event.data.occurrenceId}`,
+            [{ type: 'InvoiceIssued', data: { occurrenceId: event.data.occurrenceId } }],
+            { tx },
+          )
+
+          if (failures > 0) {
+            failures--
+            throw new Error('the reaction failed')
+          }
+        })
+        .done()
+
+      onDispose(
+        await createReactionConsumer({
+          getOptions: () => options,
+          reaction: issueInvoice,
+          pollInterval: Duration.ofMiliseconds(50),
+          retry: () => Duration.ofSeconds(1),
+          onFailedPublish,
+        }).start(),
+      )
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [completed('o-1'), note('after')])
+
+      // after the failure: no invoice, and the events after it in the stream wait
+      await waitUntil(() => onFailedPublish.mock.calls.length === 1)
+      expect(await eventStore.readStreamVersion('invoice-o-1')).toBe(0n)
+      expect(await reactionCheckpoint(pool, 'billing:flaky', 'task-1')).toBe(0)
+
+      await waitUntil(async () => (await reactionCheckpoint(pool, 'billing:flaky', 'task-1')) === 2)
+      expect(await eventStore.readStreamVersion('invoice-o-1')).toBe(1n)
+    })
+  })
+
+  test('after a restart, does not react to an event twice', async () => {
+    await mysql.withDatabase(async ({ pool, options }) => {
+      const eventStore = await setUp(pool)
+      const handled: bigint[] = []
+      const counting = defineHermesReaction<SchedulingEvent, EventStoreTransaction>()
+        .ofName('counting')
+        .ofEvents('NoteAdded')
+        .ofHandler((event) => {
+          handled.push(event.streamPosition)
+        })
+        .done()
+      const create = () =>
+        createReactionConsumer({
+          getOptions: () => options,
+          reaction: counting,
+          pollInterval: Duration.ofMiliseconds(50),
+        })
+
+      let stop = await create().start()
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a'), note('b')])
+      await waitUntil(() => handled.length === 2)
+      await stop()
+
+      stop = await create().start()
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('c')])
+      await waitUntil(() => handled.length === 3)
+      await setTimeout(300)
+      await stop()
+
+      expect(handled).toEqual([1n, 2n, 3n])
+    })
+  })
+
+  const failingReaction = (name: string, eventStore: Awaited<ReturnType<typeof setUp>>, fails: () => boolean) =>
+    defineHermesReaction<SchedulingEvent, EventStoreTransaction>()
+      .ofName(name)
+      .ofEvents('TaskCompleted')
+      .ofHandler(async (event, { tx }) => {
+        await eventStore.appendToStream<Billing>(
+          `invoice-${event.data.occurrenceId}`,
+          [{ type: 'InvoiceIssued', data: { occurrenceId: event.data.occurrenceId } }],
+          { tx },
+        )
+
+        if (fails()) {
+          throw new Error(`cannot invoice ${event.data.occurrenceId}`)
+        }
+      })
+      .done()
+
+  const deadLetters = (pool: Pool) =>
+    select<Record<string, unknown>>(
+      pool,
+      'SELECT `consumer_name`, `stream_id`, `stream_position`, `event_id`, `event_type`, `attempts`, `error` FROM `hermes_dead_letters` ORDER BY 2, 3',
+    )
+
+  test('after maxAttempts, writes the event to the dead letters, calls onGiveUp in the same transaction and goes on', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const onGiveUp = jest.fn(async (event: RecordedEvent, error: unknown, { tx }: { tx: PoolConnection }) => {
+        await tx.query("UPDATE `hermes_dead_letters` SET `error` = CONCAT('handled: ', `error`) WHERE `event_id` = ?", [
+          event.eventId,
+        ])
+      })
+      const onFailedPublish = jest.fn()
+
+      onDispose(
+        await createReactionConsumer({
+          getOptions: () => options,
+          reaction: failingReaction('billing:broken', eventStore, () => true),
+          pollInterval: Duration.ofMiliseconds(50),
+          retry: () => Duration.ofMiliseconds(50),
+          maxAttempts: 3,
+          onGiveUp,
+          onFailedPublish,
+        }).start(),
+      )
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [completed('o-1'), note('after')])
+
+      await waitUntil(async () => (await reactionCheckpoint(pool, 'billing:broken', 'task-1')) === 2)
+
+      expect(onFailedPublish).toHaveBeenCalledTimes(2)
+      expect(onGiveUp).toHaveBeenCalledTimes(1)
+      expect((onGiveUp.mock.calls[0][1] as Error).message).toBe('cannot invoice o-1')
+      expect(await eventStore.readStreamVersion('invoice-o-1')).toBe(0n)
+      expect(await deadLetters(pool)).toEqual([
+        {
+          consumer_name: 'reaction:billing:broken',
+          stream_id: 'task-1',
+          stream_position: '1',
+          event_id: expect.any(String),
+          event_type: 'TaskCompleted',
+          attempts: 3,
+          error: expect.stringMatching(/^handled: Error: cannot invoice o-1/),
+        },
+      ])
+      expect(
+        await count(
+          pool,
+          'SELECT `attempts` AS n FROM `hermes_subscriptions` WHERE `consumer_name` = ? AND `stream_id` = ?',
+          ['reaction:billing:broken', 'task-1'],
+        ),
+      ).toBe(0)
+    })
+  })
+
+  test('without onGiveUp, a dead letter is written and the stream goes on', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+
+      onDispose(
+        await createReactionConsumer({
+          getOptions: () => options,
+          reaction: failingReaction('billing:broken', eventStore, () => true),
+          pollInterval: Duration.ofMiliseconds(50),
+          retry: () => Duration.ofMiliseconds(50),
+          maxAttempts: 1,
+        }).start(),
+      )
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [completed('o-1')])
+      await eventStore.appendToStream<SchedulingEvent>('task-2', [completed('o-2')])
+
+      await waitUntil(async () => (await count(pool, 'SELECT COUNT(*) AS n FROM `hermes_dead_letters`')) === 2)
+      expect((await deadLetters(pool)).map((row) => [row.stream_id, row.attempts])).toEqual([
+        ['task-1', 1],
+        ['task-2', 1],
+      ])
+    })
+  })
+
+  test('onGiveUp that throws keeps the stream waiting, and the handler is retried until it succeeds', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      let fixed = false
+      const onGiveUp = jest.fn(() => {
+        throw new Error('wait for a fix')
+      })
+
+      onDispose(
+        await createReactionConsumer({
+          getOptions: () => options,
+          reaction: failingReaction('billing:until-fixed', eventStore, () => !fixed),
+          pollInterval: Duration.ofMiliseconds(50),
+          retry: () => Duration.ofMiliseconds(50),
+          maxAttempts: 2,
+          onGiveUp,
+        }).start(),
+      )
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [completed('o-1'), note('after')])
+
+      await waitUntil(() => onGiveUp.mock.calls.length >= 2)
+      expect(await reactionCheckpoint(pool, 'billing:until-fixed', 'task-1')).toBe(0)
+      expect(await count(pool, 'SELECT COUNT(*) AS n FROM `hermes_dead_letters`')).toBe(0)
+
+      fixed = true
+
+      await waitUntil(async () => (await reactionCheckpoint(pool, 'billing:until-fixed', 'task-1')) === 2)
+      expect(await eventStore.readStreamVersion('invoice-o-1')).toBe(1n)
+      expect(await count(pool, 'SELECT COUNT(*) AS n FROM `hermes_dead_letters`')).toBe(0)
+    })
+  })
+
+  test('maxAttempts has to be a positive integer, and onGiveUp needs it', () => {
+    const reaction = defineHermesReaction<SchedulingEvent>()
+      .ofName('r')
+      .ofEvents('NoteAdded')
+      .ofHandler(() => {})
+      .done()
+
+    expect(() => createReactionConsumer({ getOptions: () => ({}), reaction, maxAttempts: 0 })).toThrow(
+      'maxAttempts has to be an integer of at least 1.',
+    )
+    expect(() => createReactionConsumer({ getOptions: () => ({}), reaction, onGiveUp: () => {} })).toThrow(
+      'onGiveUp needs maxAttempts.',
+    )
   })
 })
 

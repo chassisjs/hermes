@@ -1,6 +1,7 @@
 export { createCommandHandler } from './createCommandHandler.js'
 export { createInMemoryEventStore } from './createInMemoryEventStore.js'
 export { applyProjection, defineHermesProjection } from './defineHermesProjection.js'
+export { defineHermesReaction, reactOn } from './defineHermesReaction.js'
 export { assertExpectedVersion } from './expectedVersion.js'
 export type {
   AppendOptions,
@@ -14,7 +15,9 @@ export type {
   ExpectedVersion,
   HandleOptions,
   HermesProjection,
+  HermesReaction,
   ProjectionMode,
+  ReactionContext,
   ReadStreamOptions,
   ReadStreamResult,
   RecordedEvent,

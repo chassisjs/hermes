@@ -3,6 +3,7 @@ const EventsTable = 'hermes_events'
 const SubscriptionsTable = 'hermes_subscriptions'
 const ProjectionsTable = 'hermes_projections'
 const ProjectionVersionsTable = 'hermes_projection_versions'
+const DeadLettersTable = 'hermes_dead_letters'
 const EventStoreMigrationTable = 'hermes_event_store_migrations'
 
 /**
@@ -70,6 +71,23 @@ const eventStoreMigrations = [
       ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4`,
     ],
   },
+  {
+    version: 2,
+    name: 'create the dead letters of the consumers',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS \`${DeadLettersTable}\` (
+        \`consumer_name\`    VARCHAR(250)     COLLATE utf8mb4_0900_bin NOT NULL,
+        \`stream_id\`        VARCHAR(250)     COLLATE utf8mb4_0900_bin NOT NULL,
+        \`stream_position\`  BIGINT UNSIGNED  NOT NULL,
+        \`event_id\`         VARCHAR(250)     COLLATE utf8mb4_0900_bin NOT NULL,
+        \`event_type\`       VARCHAR(250)     NOT NULL,
+        \`attempts\`         INT UNSIGNED     NOT NULL,
+        \`error\`            MEDIUMTEXT       NULL,
+        \`failed_at\`        DATETIME(6)      NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+        PRIMARY KEY (\`consumer_name\`, \`stream_id\`, \`stream_position\`)
+      ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4`,
+    ],
+  },
 ]
 
 /**
@@ -106,6 +124,7 @@ const changedStreamsQuery = (params: { consumerName: string; limit: number; owne
 
 export {
   changedStreamsQuery,
+  DeadLettersTable,
   DeadlockErrno,
   DuplicateEntryErrno,
   EventsTable,
