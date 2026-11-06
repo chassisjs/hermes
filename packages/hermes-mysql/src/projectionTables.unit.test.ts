@@ -13,8 +13,8 @@ describe('projectionTables', () => {
     const camel = projectionTables({ name: 'openOccurrences', isSingleStream: false })
     const colon = projectionTables({ name: 'billing:open-occurrences', isSingleStream: false })
 
-    expect(camel.documents).toMatch(/^hermes_projection_open_occurrences_[0-9a-f]{8}$/)
-    expect(colon.documents).toMatch(/^hermes_projection_billing_open_occurrences_[0-9a-f]{8}$/)
+    expect(camel.documents).toMatch(/^hermes_projection_open_occurrences__[0-9a-f]{8}$/)
+    expect(colon.documents).toMatch(/^hermes_projection_billing_open_occurrences__[0-9a-f]{8}$/)
     expect(camel.versions).toBe(`${camel.documents}_versions`)
     expect(new Set([camel.documents, colon.documents, 'hermes_projection_open_occurrences']).size).toBe(3)
     expect(projectionTables({ name: 'Open_Occurrences', isSingleStream: true }).documents).not.toBe(
@@ -27,7 +27,7 @@ describe('projectionTables', () => {
     const { documents, versions } = projectionTables({ name, isSingleStream: false })
 
     expect(versions?.length).toBeLessThanOrEqual(64)
-    expect(documents).toMatch(/^hermes_projection_a+_[0-9a-f]{8}$/)
+    expect(documents).toMatch(/^hermes_projection_a+__[0-9a-f]{8}$/)
     expect(projectionTables({ name: `${'a'.repeat(249)}b`, isSingleStream: false }).documents).not.toBe(documents)
   })
 
@@ -43,7 +43,13 @@ describe('projectionTables', () => {
     const ordersVersions = projectionTables({ name: 'orders_versions', isSingleStream: true })
 
     expect(ordersVersions.documents).not.toBe(orders.versions)
-    expect(ordersVersions.documents).toMatch(/^hermes_projection_orders_versions_[0-9a-f]{8}$/)
+    expect(ordersVersions.documents).toMatch(/^hermes_projection_orders_versions__[0-9a-f]{8}$/)
+  })
+
+  test('a name ending in a date or a number stays plain', () => {
+    expect(projectionTables({ name: 'orders_20261106', isSingleStream: true }).documents).toBe(
+      'hermes_projection_orders_20261106',
+    )
   })
 
   test('a plain name never looks like a hashed one', () => {

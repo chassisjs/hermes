@@ -226,7 +226,7 @@ const applyToDocument = async (
 
   if (state === null || state === undefined) {
     await ex.query(`DELETE FROM \`${tables.documents}\` WHERE \`id\` = ?`, [documentId])
-  } else if (state !== data) {
+  } else {
     await ex.query(`UPDATE \`${tables.documents}\` SET \`data\` = CAST(? AS JSON) WHERE \`id\` = ?`, [
       JSON.stringify(state),
       documentId,
@@ -269,10 +269,12 @@ const applyToSingleStreamDocument = async (
   }
 
   const nextVersion = fresh[fresh.length - 1].streamPosition.toString()
-  const state = fresh.some((event) => projection.canHandle(event)) ? applyProjection(projection, data, fresh) : data
+  // decided by what was handled, not by comparing the states: an `evolve` may change the state in place
+  const handled = fresh.some((event) => projection.canHandle(event))
+  const state = handled ? applyProjection(projection, data, fresh) : data
   const deleted = state === null || state === undefined
 
-  if (state === data || (deleted && data === null)) {
+  if (!handled || (deleted && data === null)) {
     // nothing to show changed: only the version moves, without rewriting the JSON
     await ex.query(
       `UPDATE \`${table}\` SET \`version\` = GREATEST(\`version\`, CAST(? AS UNSIGNED)), \`updated_at\` = \`updated_at\`

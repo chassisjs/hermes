@@ -1829,17 +1829,26 @@ describe('Projection tables', () => {
     })
   })
 
-  test('an event that changes nothing in a single-stream document moves only its version', async () => {
+  test('an event a single-stream projection does not handle moves only the version of its document', async () => {
     await mysql.withDatabase(async ({ pool }) => {
-      const eventStore = await setUp(pool)
-      const table = projectionTables(occurrences).documents
+      await migrate(pool, { eventStore: true })
+      const completions = defineHermesProjection<{ completed: number }, SchedulingEvent>()
+        .ofName('completions_only')
+        .ofDocumentType()
+        .ofEvents('TaskCompleted')
+        .ofInitialState(() => ({ completed: 0 }))
+        .ofEvolve((state) => ({ completed: state.completed + 1 }))
+        .inline()
+        .done()
+      const eventStore = createEventStore(pool, { projections: [completions] })
+      const table = projectionTables(completions).documents
       const row = () =>
         select<Record<string, unknown>>(
           pool,
           `SELECT CAST(\`data\` AS CHAR) AS data, \`version\`, \`updated_at\` FROM \`${table}\``,
         )
 
-      await eventStore.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', FUTURE)])
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [completed('o-1')])
       // a number above 2^53 would lose its precision on a rewrite through JavaScript
       await pool.query(
         `UPDATE \`${table}\` SET \`data\` = JSON_SET(\`data\`, '$.big', CAST('12345678901234567890' AS JSON))`,
@@ -1899,6 +1908,41 @@ describe('Projection tables', () => {
         /cannot start with projection: or reaction:/,
       )
     }
+  })
+  test('an evolve that changes the state in place still updates the document', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool, { eventStore: true })
+      const mutate = (state: { count: number }) => {
+        state.count++
+
+        return state
+      }
+      const perStream = defineHermesProjection<{ count: number }, SchedulingEvent>()
+        .ofName('notes_in_place')
+        .ofDocumentType()
+        .ofEvents('NoteAdded')
+        .ofInitialState(() => ({ count: 0 }))
+        .ofEvolve(mutate)
+        .inline()
+        .done()
+      const allStreams = defineHermesProjection<{ count: number }, SchedulingEvent>()
+        .ofName('all_notes_in_place')
+        .ofDocumentType()
+        .ofEvents('NoteAdded')
+        .ofInitialState(() => ({ count: 0 }))
+        .ofEvolve(mutate)
+        .ofId(() => 'all')
+        .inline()
+        .done()
+      const eventStore = createEventStore(pool, { projections: [perStream, allStreams] })
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a')])
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('b')])
+      await eventStore.appendToStream<SchedulingEvent>('task-2', [note('c')])
+
+      expect(await eventStore.readProjection(perStream, 'task-1')).toEqual({ data: { count: 2 }, version: 2n })
+      expect(await eventStore.readProjection(allStreams, 'all')).toEqual({ data: { count: 3 }, version: null })
+    })
   })
 })
 

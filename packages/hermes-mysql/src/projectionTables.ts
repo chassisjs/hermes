@@ -28,17 +28,19 @@ const MaxBaseLength = MaxIdentifierLength - TablePrefix.length - VersionsSuffix.
 const HashLength = 8
 
 const baseByName = new Map<string, string>()
-// A plain name must not look like the versions table of another projection, nor like a hashed name.
-const ReservedEnding = new RegExp(`(${VersionsSuffix}|_[0-9a-f]{${HashLength}})$`)
+// A plain name must not look like the versions table of another projection, nor like a hashed name, which ends in
+// `__` and 8 hexadecimal digits.
+const HashedEnding = new RegExp(`__[0-9a-f]{${HashLength}}$`)
+const looksReserved = (slug: string) => slug.endsWith(VersionsSuffix) || HashedEnding.test(slug)
 const VersionColumn = '\n        `version`     BIGINT UNSIGNED  NOT NULL DEFAULT 0,'
 
 /**
  * The tables of a projection, named after it: `hermes_projection_<name>`, and `hermes_projection_<name>_versions` in a
  * multi-stream projection (`ofId`).
  *
- * A name of lowercase letters, digits and `_` (at most 37 characters, not ending in `_versions` or in `_` and 8
- * hexadecimal digits) is used as it is. Any other name is turned into one (camelCase into snake_case, other characters
- * into `_`) and gets 8 characters of the SHA-256 of the name, so that two projections never share a table, also where
+ * A name of lowercase letters, digits and `_` (at most 37 characters, not ending in `_versions` or in `__` and 8
+ * hexadecimal digits) is used as it is, e.g. `orders_20261106`. Any other name is turned into one (camelCase into
+ * snake_case, other characters into `_`) and gets `__` and 8 characters of the SHA-256 of the name, so that two projections never share a table, also where
  * MySQL ignores the case of table names (macOS, Windows).
  *
  * The tables of a single-stream projection differ from those of a multi-stream one, so turning one into the other
@@ -50,7 +52,7 @@ const VersionColumn = '\n        `version`     BIGINT UNSIGNED  NOT NULL DEFAULT
  * // { documents: 'hermes_projection_open_occurrences', versions: null }
  *
  * projectionTables(occurrencesByPatient) // name 'occurrencesByPatient', with ofId
- * // { documents: 'hermes_projection_occurrences_by_patient_1c1a2c3e', versions: '..._1c1a2c3e_versions' }
+ * // { documents: 'hermes_projection_occurrences_by_patient__1c1a2c3e', versions: '...__1c1a2c3e_versions' }
  * ```
  */
 const projectionTables = ({ name, isSingleStream }: ProjectionShape): ProjectionTables => {
@@ -65,9 +67,9 @@ const projectionTables = ({ name, isSingleStream }: ProjectionShape): Projection
       .replace(/[^a-z0-9_]+/g, '_')
 
     base =
-      slug === name && slug.length <= MaxBaseLength && !ReservedEnding.test(slug)
+      slug === name && slug.length <= MaxBaseLength && !looksReserved(slug)
         ? slug
-        : `${slug.slice(0, MaxBaseLength - HashLength - 1)}_${createHash('sha256').update(name).digest('hex').slice(0, HashLength)}`
+        : `${slug.slice(0, MaxBaseLength - HashLength - 2)}__${createHash('sha256').update(name).digest('hex').slice(0, HashLength)}`
     baseByName.set(name, base)
   }
 

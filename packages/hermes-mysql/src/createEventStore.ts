@@ -60,6 +60,7 @@ type MySqlEventStore = EventStore<EventStoreTransaction> & {
 
 const OwnTransactionAttempts = 5
 const NoSuchTableErrno = 1146
+const TableDefinitionChangedErrno = 1412
 const Savepoint = 'hermes_append'
 
 const errnoOf = (error: unknown) => (error as { errno?: number }).errno
@@ -146,7 +147,7 @@ const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] 
   const init = () => ensureProjectionTables(pool, projections)
   // a table dropped after it was created is created again by the next append without `tx`
   const forgetOnMissingTable = (error: unknown) => {
-    if (errnoOf(error) === NoSuchTableErrno) {
+    if (errnoOf(error) === NoSuchTableErrno && String((error as Error).message).includes('hermes_projection_')) {
       forgetProjectionTables(pool)
     }
   }
@@ -273,6 +274,14 @@ const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] 
 
         return append(options.tx, streamId, events, expectedVersion, false).catch((error: unknown) => {
           forgetOnMissingTable(error)
+
+          if (errnoOf(error) === TableDefinitionChangedErrno) {
+            // a table of a projection was created after the transaction began
+            Object.assign(error as object, {
+              message: `${(error as Error).message} Retry the transaction, and call init() of the event store on start.`,
+            })
+          }
+
           throw error
         })
       }
