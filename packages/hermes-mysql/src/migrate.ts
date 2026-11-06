@@ -130,7 +130,7 @@ const migrate = async (
   options?: {
     lockTimeout?: Duration
     eventStore?: boolean
-    projections?: readonly Pick<HermesProjection<unknown>, 'name'>[]
+    projections?: readonly Pick<HermesProjection<unknown>, 'name' | 'isSingleStream'>[]
   },
 ): Promise<number[]> => {
   assert(!options?.projections?.length || options.eventStore, 'The tables of the projections need eventStore: true.')

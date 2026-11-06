@@ -118,8 +118,9 @@ const lockStream = async (ex: Queryable, streamId: string, readCommitted: boolea
  * expected version.
  *
  * Every projection has its own tables, created when they are missing (see {@link MySqlEventStore.init}):
- * `hermes_projection_<name>` keeps the documents and `hermes_projection_<name>_versions` the version of every stream
- * that fed a document. Those rows are never removed: a document fed by a million streams has a million rows there.
+ * `hermes_projection_<name>` keeps the documents, and in a single-stream projection also the version of its stream.
+ * A multi-stream projection keeps the version of every stream that fed a document in `hermes_projection_<name>_versions`.
+ * Those rows are never removed: a document fed by a million streams has a million rows there.
  *
  * Its own transaction is tried again when MySQL picks it as the victim of a deadlock (e.g. when many instances create
  * the same stream at once). A deadlock in the transaction of the application rolls back the whole transaction, so it

@@ -1321,7 +1321,7 @@ describe('Async projections', () => {
       expect(
         await select(
           pool,
-          `SELECT \`stream_id\`, \`version\` FROM \`${projectionTables({ name: 'eventCounter' }).versions}\` WHERE \`id\` = ? ORDER BY 1`,
+          `SELECT \`stream_id\`, \`version\` FROM \`${projectionTables(eventCounter).versions}\` WHERE \`id\` = ? ORDER BY 1`,
           ['all'],
         ),
       ).toEqual([
@@ -1373,7 +1373,12 @@ describe('Async projections', () => {
       await waitUntil(async () => (await checkpoint()) === 2)
 
       expect(await eventStore.readProjection(openOccurrences, 'task-1')).toBeNull()
-      expect(await count(pool, `SELECT COUNT(*) AS n FROM \`${projectionTables(openOccurrences).documents}\``)).toBe(0)
+      expect(
+        await count(
+          pool,
+          `SELECT COUNT(*) AS n FROM \`${projectionTables(openOccurrences).documents}\` WHERE \`data\` IS NOT NULL`,
+        ),
+      ).toBe(0)
 
       await pool.query('UPDATE `hermes_subscriptions` SET `version` = 0 WHERE `consumer_name` = ?', [
         'projection:openOccurrences',
@@ -1682,7 +1687,6 @@ describe('Projection tables', () => {
       expect(await projectionTablesIn(pool)).toEqual(
         [
           projectionTables(occurrences).documents,
-          projectionTables(occurrences).versions,
           projectionTables(eventCounter).documents,
           projectionTables(eventCounter).versions,
         ].sort(),
@@ -1704,9 +1708,7 @@ describe('Projection tables', () => {
 
       await eventStore.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', FUTURE)])
 
-      expect(await projectionTablesIn(pool)).toEqual(
-        [projectionTables(occurrences).documents, projectionTables(occurrences).versions].sort(),
-      )
+      expect(await projectionTablesIn(pool)).toEqual([projectionTables(occurrences).documents])
       expect(await count(pool, `SELECT COUNT(*) AS n FROM \`${projectionTables(occurrences).documents}\``)).toBe(1)
     })
   })
@@ -1734,9 +1736,7 @@ describe('Projection tables', () => {
 
       await migrate(pool, { eventStore: true, projections: [occurrences] })
 
-      expect(await projectionTablesIn(pool)).toEqual(
-        [projectionTables(occurrences).documents, projectionTables(occurrences).versions].sort(),
-      )
+      expect(await projectionTablesIn(pool)).toEqual([projectionTables(occurrences).documents])
     })
   })
 
@@ -2068,7 +2068,7 @@ describe('Deleted and not yet handled documents', () => {
 
       expect(await eventStore.readProjection(completions, 'task-1')).toBeNull()
       expect(
-        await select(pool, `SELECT \`version\` FROM \`${projectionTables(completions).versions}\` WHERE \`id\` = ?`, [
+        await select(pool, `SELECT \`version\` FROM \`${projectionTables(completions).documents}\` WHERE \`id\` = ?`, [
           'task-1',
         ]),
       ).toEqual([{ version: '3' }])

@@ -40,10 +40,19 @@ const toRecordedEvent = (row: EventRow) =>
     recordedAt: row.recorded_at,
   }) as RecordedEvent
 
+type LockedDocument = {
+  /** `null` for a document that does not exist, was deleted, or has no handled events yet. */
+  data: unknown
+  /** The version of its stream, in a single-stream projection (0 for a new document); `null` otherwise. */
+  version: bigint | null
+}
+
 /**
- * Locks the row of a document, creating an empty one (`data` is `NULL`) when there is none. A `NULL` row exists only
- * inside the transaction that created it (it is filled or deleted before the commit), so `data === null` means that
- * the document is new.
+ * Locks the row of a document, creating an empty one (`data` is `NULL`, `version` is 0) when there is none.
+ *
+ * In a multi-stream projection, a `NULL` row exists only inside the transaction that created it (it is filled or
+ * deleted before the commit). In a single-stream projection, the row also keeps the version of its stream, so it
+ * stays when the document is deleted (`data` is `NULL`), and a replay does not bring the document back.
  *
  * In `READ COMMITTED`, `INSERT ... ON DUPLICATE KEY UPDATE` takes the exclusive lock at once: there are no gap locks
  * to fear, and two transactions creating the same document do not deadlock on an upgrade of a shared lock.
@@ -52,13 +61,21 @@ const toRecordedEvent = (row: EventRow) =>
  * exists, so that `REPEATABLE READ` does not lock the gap of a missing row, which would block the documents of other
  * streams. A row created by a concurrent transaction is a duplicate key, and then it is locked like an existing one.
  */
-const lockDocument = async (ex: Queryable, table: string, id: string, { readCommitted }: ApplyOptions) => {
-  const lockExisting = async () => {
-    const [rows] = await ex.query<RowDataPacket[]>(`SELECT \`data\` FROM \`${table}\` WHERE \`id\` = ? FOR UPDATE`, [
+const lockDocument = async (
+  ex: Queryable,
+  table: string,
+  id: string,
+  { readCommitted }: ApplyOptions,
+  withVersion: boolean,
+): Promise<LockedDocument> => {
+  const columns = withVersion ? '`data`, `version`' : '`data`'
+  const created: LockedDocument = { data: null, version: withVersion ? 0n : null }
+  const lockExisting = async (): Promise<LockedDocument | null> => {
+    const [rows] = await ex.query<RowDataPacket[]>(`SELECT ${columns} FROM \`${table}\` WHERE \`id\` = ? FOR UPDATE`, [
       id,
     ])
 
-    return rows.length ? ((rows[0].data ?? null) as unknown) : null
+    return rows.length ? { data: rows[0].data ?? null, version: withVersion ? toBigInt(rows[0].version) : null } : null
   }
 
   if (readCommitted) {
@@ -67,31 +84,29 @@ const lockDocument = async (ex: Queryable, table: string, id: string, { readComm
       [id],
     )
 
-    return lockExisting()
+    return (await lockExisting()) ?? created
   }
 
   const [found] = await ex.query<RowDataPacket[]>(`SELECT 1 FROM \`${table}\` WHERE \`id\` = ?`, [id])
 
   if (found.length) {
-    const [rows] = await ex.query<RowDataPacket[]>(`SELECT \`data\` FROM \`${table}\` WHERE \`id\` = ? FOR UPDATE`, [
-      id,
-    ])
+    const existing = await lockExisting()
 
-    if (rows.length) {
-      return (rows[0].data ?? null) as unknown
+    if (existing) {
+      return existing
     }
   }
 
   try {
     await ex.query(`INSERT INTO \`${table}\` (\`id\`, \`data\`) VALUES (?, NULL)`, [id])
 
-    return null
+    return created
   } catch (error) {
     if (errnoOf(error) !== DuplicateEntryErrno) {
       throw error
     }
 
-    return lockExisting()
+    return (await lockExisting()) ?? created
   }
 }
 
@@ -162,9 +177,10 @@ const readEventsBefore = async (ex: Queryable, streamId: string, before: bigint)
 /**
  * Applies events of one stream to one document, in a transaction.
  *
- * The document keeps the version of every stream that fed it (the `_versions` table of the projection), so an event at or below
- * that version was already applied and is skipped: a replay or a redelivery does not change the document. A document
- * that `evolve` turns into `null` is deleted, and its versions stay, so a replay does not bring it back.
+ * The document keeps the version of every stream that fed it (in its own row in a single-stream projection, in the
+ * `_versions` table in a multi-stream one), so an event at or below that version was already applied and is skipped:
+ * a replay or a redelivery does not change the document. A document that `evolve` turns into `null` is deleted, and
+ * its versions stay, so a replay does not bring it back.
  *
  * A single-stream document that does not exist yet for a stream that has earlier events (e.g. the projection was
  * added to a running application) is built from all the events of the stream first, so it never misses them.
@@ -182,34 +198,25 @@ const applyToDocument = async (
 
   const tables = projectionTables(projection)
   const { documentId, streamId } = target
-  const data = await lockDocument(ex, tables.documents, documentId, options)
+
+  if (tables.versions === null) {
+    await applyToSingleStreamDocument(ex, projection, tables.documents, streamId, events, options)
+
+    return
+  }
+
+  const { data } = await lockDocument(ex, tables.documents, documentId, options, false)
   const [versions] = await ex.query<RowDataPacket[]>(
     `SELECT \`version\` FROM \`${tables.versions}\` WHERE \`id\` = ? AND \`stream_id\` = ?`,
     [documentId, streamId],
   )
   const version = versions.length ? toBigInt(versions[0].version) : 0n
-  const catchUp =
-    projection.isSingleStream && !versions.length && data === null && events[0].streamPosition > 1n
-      ? await readEventsBefore(ex, streamId, events[0].streamPosition)
-      : []
-  const fresh = [...catchUp, ...events].filter(({ streamPosition }) => streamPosition > version)
+  const fresh = events.filter(({ streamPosition }) => streamPosition > version)
   const handled = fresh.filter((event) => projection.canHandle(event))
 
   if (!fresh.length || (!handled.length && data === null)) {
     if (data === null) {
       await ex.query(`DELETE FROM \`${tables.documents}\` WHERE \`id\` = ?`, [documentId])
-    }
-
-    // A single-stream document without handled events yet still records how far its stream was read, so that the
-    // catch-up from the earlier events runs at most once per stream.
-    if (fresh.length && projection.isSingleStream) {
-      await setVersion(
-        ex,
-        tables.versions,
-        { id: documentId, streamId },
-        fresh[fresh.length - 1].streamPosition,
-        versions.length > 0,
-      )
     }
 
     return
@@ -232,6 +239,45 @@ const applyToDocument = async (
     { id: documentId, streamId },
     fresh[fresh.length - 1].streamPosition,
     versions.length > 0,
+  )
+}
+
+/**
+ * Applies events to the document of their stream, whose row keeps the version of the stream, so one lock covers both.
+ *
+ * The row stays when there is nothing to show (`data` is `NULL`): when `evolve` deleted the document, and when the
+ * stream has no handled events yet, so that the catch-up from the earlier events runs at most once per stream.
+ */
+const applyToSingleStreamDocument = async (
+  ex: Queryable,
+  projection: AnyProjection,
+  table: string,
+  streamId: string,
+  events: RecordedEvent<Event>[],
+  options: ApplyOptions,
+) => {
+  const { data, version } = await lockDocument(ex, table, streamId, options, true)
+  const applied = version ?? 0n
+  const catchUp =
+    applied === 0n && events[0].streamPosition > 1n
+      ? await readEventsBefore(ex, streamId, events[0].streamPosition)
+      : []
+  const fresh = [...catchUp, ...events].filter(({ streamPosition }) => streamPosition > applied)
+
+  if (!fresh.length) {
+    return
+  }
+
+  const state = fresh.some((event) => projection.canHandle(event)) ? applyProjection(projection, data, fresh) : data
+
+  await ex.query(
+    `UPDATE \`${table}\` SET \`data\` = CAST(? AS JSON), \`version\` = GREATEST(\`version\`, CAST(? AS UNSIGNED))
+     WHERE \`id\` = ?`,
+    [
+      state === null || state === undefined ? null : JSON.stringify(state),
+      fresh[fresh.length - 1].streamPosition.toString(),
+      streamId,
+    ],
   )
 }
 
@@ -288,7 +334,10 @@ const readDocument = async <State>(ex: Queryable, projection: HermesProjection<S
   let rows: RowDataPacket[]
 
   try {
-    ;[rows] = await ex.query<RowDataPacket[]>(`SELECT \`data\` FROM \`${tables.documents}\` WHERE \`id\` = ?`, [id])
+    ;[rows] = await ex.query<RowDataPacket[]>(
+      `SELECT ${tables.versions === null ? '`data`, `version`' : '`data`'} FROM \`${tables.documents}\` WHERE \`id\` = ?`,
+      [id],
+    )
   } catch (error) {
     if (errnoOf(error) === NoSuchTableErrno) {
       return null
@@ -301,16 +350,10 @@ const readDocument = async <State>(ex: Queryable, projection: HermesProjection<S
     return null
   }
 
-  if (!projection.isSingleStream) {
-    return { data: rows[0].data as State, version: null }
+  return {
+    data: rows[0].data as State,
+    version: tables.versions === null ? toBigInt(rows[0].version) : null,
   }
-
-  const [versions] = await ex.query<RowDataPacket[]>(
-    `SELECT \`version\` FROM \`${tables.versions}\` WHERE \`id\` = ? AND \`stream_id\` = ?`,
-    [id, id],
-  )
-
-  return { data: rows[0].data as State, version: versions.length ? toBigInt(versions[0].version) : 0n }
 }
 
 export {
