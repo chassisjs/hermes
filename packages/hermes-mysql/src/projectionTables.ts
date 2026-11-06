@@ -40,8 +40,8 @@ const VersionColumn = '\n        `version`     BIGINT UNSIGNED  NOT NULL DEFAULT
  *
  * A name of lowercase letters, digits and `_` (at most 37 characters, not ending in `_versions` or in `__` and 8
  * hexadecimal digits) is used as it is, e.g. `orders_20261106`. Any other name is turned into one (camelCase into
- * snake_case, other characters into `_`) and gets `__` and 8 characters of the SHA-256 of the name, so that two projections never share a table, also where
- * MySQL ignores the case of table names (macOS, Windows).
+ * snake_case, other characters into `_`) and gets `__` and 8 characters of the SHA-256 of the name, so that two
+ * projections never share a table, also where MySQL ignores the case of table names (macOS, Windows).
  *
  * The tables of a single-stream projection differ from those of a multi-stream one, so turning one into the other
  * needs a new name.
