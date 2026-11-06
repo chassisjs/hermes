@@ -1,8 +1,14 @@
-import { Duration } from '@chassisjs/hermes'
-import { setTimeout } from 'node:timers/promises'
+import { assert, Duration, type HermesProjection } from '@chassisjs/hermes'
 import { type Pool, type PoolConnection, type RowDataPacket } from 'mysql2/promise'
 import { EventStoreMigrationTable, eventStoreMigrations } from './eventStoreSql.js'
-import { MigrationTable, OutboxTable, PartitionTable } from './sql.js'
+import { createProjectionTables } from './projectionTables.js'
+import {
+  MigrationTable,
+  OutboxTable,
+  PartitionTable,
+  retryOnTableLockTimeout,
+  TableLockWaitTimeoutSeconds,
+} from './sql.js'
 
 /**
  * A change of the Hermes tables.
@@ -58,24 +64,6 @@ const migrations: Migration[] = [
   },
 ]
 
-const TableLockWaitTimeoutSeconds = 5
-const TableLockAttempts = 10
-const LockWaitTimeoutErrno = 1205
-
-const retryOnTableLockTimeout = async <T>(statement: () => Promise<T>): Promise<T> => {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await statement()
-    } catch (error) {
-      if ((error as { errno?: number }).errno !== LockWaitTimeoutErrno || attempt >= TableLockAttempts) {
-        throw error
-      }
-
-      await setTimeout(Duration.ofSeconds(1).ms)
-    }
-  }
-}
-
 /**
  * Applies the pending migrations of one track, recorded in `table`.
  *
@@ -126,16 +114,27 @@ const applyMigrations = async (connection: PoolConnection, table: string, track:
  * deployment pipeline with a user that can change the schema.
  *
  * With `eventStore`, it also creates the tables of the event store (`hermes_streams`, `hermes_events`,
- * `hermes_subscriptions`, `hermes_projections`, `hermes_projection_versions`), whose versions are kept apart in
- * `hermes_event_store_migrations`. The event store is opt-in, so an application that uses only the outbox does not
- * get its tables.
+ * `hermes_subscriptions`, `hermes_dead_letters`), whose versions are kept apart in `hermes_event_store_migrations`.
+ * The event store is opt-in, so an application that uses only the outbox does not get its tables. With
+ * `projections`, it also creates the missing tables of those projections (see {@link projectionTables}); it never
+ * changes existing ones.
  *
  * @param pool - A `mysql2` pool
  * @param options.lockTimeout - How long to wait for other instances that are migrating (default: 10 minutes)
  * @param options.eventStore - Whether to create or update the tables of the event store too (default: `false`)
+ * @param options.projections - The projections whose tables to create when they are missing (needs `eventStore`)
  * @returns The versions of the outbox that this call applied
  */
-const migrate = async (pool: Pool, options?: { lockTimeout?: Duration; eventStore?: boolean }): Promise<number[]> => {
+const migrate = async (
+  pool: Pool,
+  options?: {
+    lockTimeout?: Duration
+    eventStore?: boolean
+    projections?: readonly Pick<HermesProjection<unknown>, 'name'>[]
+  },
+): Promise<number[]> => {
+  assert(!options?.projections?.length || options.eventStore, 'The tables of the projections need eventStore: true.')
+
   const lockTimeout = options?.lockTimeout ?? Duration.ofMinutes(10)
   const connection = await pool.getConnection()
   const lockName = `CONCAT('hermes_migrations.', DATABASE())`
@@ -161,6 +160,7 @@ const migrate = async (pool: Pool, options?: { lockTimeout?: Duration; eventStor
 
       if (options?.eventStore) {
         await applyMigrations(connection, EventStoreMigrationTable, eventStoreMigrations)
+        await createProjectionTables(connection, options.projections ?? [])
       }
 
       return applied

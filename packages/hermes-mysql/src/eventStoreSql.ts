@@ -88,6 +88,19 @@ const eventStoreMigrations = [
       ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4`,
     ],
   },
+  {
+    // Every projection has its own tables now (`projectionTables`), so the shared ones are dropped with their
+    // documents. The checkpoints of the async projections are removed, so that their consumers build them again in
+    // their own tables from the first event; a single-stream inline projection catches up on the next append to a
+    // stream. The documents of a multi-stream inline projection are not built again.
+    version: 3,
+    name: 'drop the shared tables of the projections',
+    statements: [
+      `DROP TABLE IF EXISTS \`${ProjectionVersionsTable}\``,
+      `DROP TABLE IF EXISTS \`${ProjectionsTable}\``,
+      `DELETE FROM \`${SubscriptionsTable}\` WHERE \`consumer_name\` LIKE 'projection:%'`,
+    ],
+  },
 ]
 
 /**

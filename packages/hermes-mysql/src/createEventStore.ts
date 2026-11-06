@@ -11,6 +11,7 @@ import {
 import { randomUUID } from 'node:crypto'
 import { type Pool, type RowDataPacket } from 'mysql2/promise'
 import { DeadlockErrno, DuplicateEntryErrno, EventsTable, StreamsTable } from './eventStoreSql.js'
+import { ensureProjectionTables } from './projectionTables.js'
 import {
   applyToProjection,
   EventColumns,
@@ -29,6 +30,15 @@ import { inTransaction, insertStatements } from './sql.js'
 type EventStoreTransaction = Queryable
 
 type MySqlEventStore = EventStore<EventStoreTransaction> & {
+  /**
+   * Creates the missing tables of the projections given to {@link createEventStore} (see {@link projectionTables}),
+   * on its own connection of the pool, never in a transaction: MySQL commits every DDL statement. An append without
+   * it creates them before its first use, but an append in a transaction of the application (`tx`) should not be
+   * the first: a table created after its transaction began cannot be read in `REPEATABLE READ` (`ER_TABLE_DEF_CHANGED`).
+   * So call it on start when you append with `tx`. Existing tables are never changed.
+   */
+  init(): Promise<void>
+
   /**
    * Reads a document of a projection.
    *
@@ -107,8 +117,9 @@ const lockStream = async (ex: Queryable, streamId: string, readCommitted: boolea
  * Every event gets a new `eventId` (a UUID); an id given by the caller is not used. For idempotent appends, use the
  * expected version.
  *
- * Every document of a projection keeps a row per stream that fed it in `hermes_projection_versions`, and the rows are
- * never removed: a document fed by a million streams has a million rows there.
+ * Every projection has its own tables, created when they are missing (see {@link MySqlEventStore.init}):
+ * `hermes_projection_<name>` keeps the documents and `hermes_projection_<name>_versions` the version of every stream
+ * that fed a document. Those rows are never removed: a document fed by a million streams has a million rows there.
  *
  * Its own transaction is tried again when MySQL picks it as the victim of a deadlock (e.g. when many instances create
  * the same stream at once). A deadlock in the transaction of the application rolls back the whole transaction, so it
@@ -117,7 +128,8 @@ const lockStream = async (ex: Queryable, streamId: string, readCommitted: boolea
  * Reads and appends use the pool, so point it at the writer of Aurora, not at a reader: the readers lag behind.
  *
  * @param pool - The `mysql2` pool of the application
- * @param options.projections - The inline projections, updated in the transaction of every append
+ * @param options.projections - The projections: the inline ones are updated in the transaction of every append, and
+ * `init()` creates the tables of all of them
  */
 const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] }): MySqlEventStore => {
   const projections = options?.projections ?? []
@@ -126,6 +138,7 @@ const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] 
   assert(new Set(names).size === names.length, 'The names of the projections have to be unique.')
 
   const inline = projections.filter(({ mode }) => mode === 'inline')
+  const init = () => ensureProjectionTables(pool, projections)
 
   const append = async (
     ex: Queryable,
@@ -211,6 +224,8 @@ const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] 
   }
 
   return {
+    init,
+
     async readStream<E extends Event>(streamId: string, options?: { after?: bigint; tx?: EventStoreTransaction }) {
       const ex = options?.tx ?? pool
       const currentVersion = await readStreamVersion(streamId, ex)
@@ -241,6 +256,8 @@ const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] 
       )
 
       const expectedVersion = options?.expectedVersion ?? 'any'
+
+      await ensureProjectionTables(pool, inline)
 
       if (options?.tx) {
         return append(options.tx, streamId, events, expectedVersion, false)

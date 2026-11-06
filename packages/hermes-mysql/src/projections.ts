@@ -1,6 +1,7 @@
 import { applyProjection, type Event, type HermesProjection, type RecordedEvent } from '@chassisjs/hermes'
 import { type PoolConnection, type RowDataPacket } from 'mysql2/promise'
-import { DuplicateEntryErrno, EventsTable, ProjectionsTable, ProjectionVersionsTable } from './eventStoreSql.js'
+import { DuplicateEntryErrno, EventsTable } from './eventStoreSql.js'
+import { projectionTables } from './projectionTables.js'
 
 /** A `mysql2` pool or connection. */
 type Queryable = Pick<PoolConnection, 'query'>
@@ -51,36 +52,30 @@ const toRecordedEvent = (row: EventRow) =>
  * exists, so that `REPEATABLE READ` does not lock the gap of a missing row, which would block the documents of other
  * streams. A row created by a concurrent transaction is a duplicate key, and then it is locked like an existing one.
  */
-const lockDocument = async (ex: Queryable, name: string, id: string, { readCommitted }: ApplyOptions) => {
+const lockDocument = async (ex: Queryable, table: string, id: string, { readCommitted }: ApplyOptions) => {
   const lockExisting = async () => {
-    const [rows] = await ex.query<RowDataPacket[]>(
-      `SELECT \`data\` FROM \`${ProjectionsTable}\` WHERE \`name\` = ? AND \`id\` = ? FOR UPDATE`,
-      [name, id],
-    )
+    const [rows] = await ex.query<RowDataPacket[]>(`SELECT \`data\` FROM \`${table}\` WHERE \`id\` = ? FOR UPDATE`, [
+      id,
+    ])
 
     return rows.length ? ((rows[0].data ?? null) as unknown) : null
   }
 
   if (readCommitted) {
     await ex.query(
-      `INSERT INTO \`${ProjectionsTable}\` (\`name\`, \`id\`, \`data\`) VALUES (?, ?, NULL)
-       ON DUPLICATE KEY UPDATE \`name\` = \`name\``,
-      [name, id],
+      `INSERT INTO \`${table}\` (\`id\`, \`data\`) VALUES (?, NULL) ON DUPLICATE KEY UPDATE \`id\` = \`id\``,
+      [id],
     )
 
     return lockExisting()
   }
 
-  const [found] = await ex.query<RowDataPacket[]>(
-    `SELECT 1 FROM \`${ProjectionsTable}\` WHERE \`name\` = ? AND \`id\` = ?`,
-    [name, id],
-  )
+  const [found] = await ex.query<RowDataPacket[]>(`SELECT 1 FROM \`${table}\` WHERE \`id\` = ?`, [id])
 
   if (found.length) {
-    const [rows] = await ex.query<RowDataPacket[]>(
-      `SELECT \`data\` FROM \`${ProjectionsTable}\` WHERE \`name\` = ? AND \`id\` = ? FOR UPDATE`,
-      [name, id],
-    )
+    const [rows] = await ex.query<RowDataPacket[]>(`SELECT \`data\` FROM \`${table}\` WHERE \`id\` = ? FOR UPDATE`, [
+      id,
+    ])
 
     if (rows.length) {
       return (rows[0].data ?? null) as unknown
@@ -88,7 +83,7 @@ const lockDocument = async (ex: Queryable, name: string, id: string, { readCommi
   }
 
   try {
-    await ex.query(`INSERT INTO \`${ProjectionsTable}\` (\`name\`, \`id\`, \`data\`) VALUES (?, ?, NULL)`, [name, id])
+    await ex.query(`INSERT INTO \`${table}\` (\`id\`, \`data\`) VALUES (?, NULL)`, [id])
 
     return null
   } catch (error) {
@@ -111,15 +106,16 @@ const lockDocument = async (ex: Queryable, name: string, id: string, { readCommi
  */
 const setVersion = async (
   ex: Queryable,
-  key: { name: string; id: string; streamId: string },
+  table: string,
+  key: { id: string; streamId: string },
   version: bigint,
   exists: boolean,
 ) => {
   const update = () =>
     ex.query(
-      `UPDATE \`${ProjectionVersionsTable}\` SET \`version\` = GREATEST(\`version\`, CAST(? AS UNSIGNED))
-       WHERE \`name\` = ? AND \`id\` = ? AND \`stream_id\` = ?`,
-      [version.toString(), key.name, key.id, key.streamId],
+      `UPDATE \`${table}\` SET \`version\` = GREATEST(\`version\`, CAST(? AS UNSIGNED))
+       WHERE \`id\` = ? AND \`stream_id\` = ?`,
+      [version.toString(), key.id, key.streamId],
     )
 
   if (exists) {
@@ -129,10 +125,11 @@ const setVersion = async (
   }
 
   try {
-    await ex.query(
-      `INSERT INTO \`${ProjectionVersionsTable}\` (\`name\`, \`id\`, \`stream_id\`, \`version\`) VALUES (?, ?, ?, ?)`,
-      [key.name, key.id, key.streamId, version.toString()],
-    )
+    await ex.query(`INSERT INTO \`${table}\` (\`id\`, \`stream_id\`, \`version\`) VALUES (?, ?, ?)`, [
+      key.id,
+      key.streamId,
+      version.toString(),
+    ])
   } catch (error) {
     if (errnoOf(error) !== DuplicateEntryErrno) {
       throw error
@@ -165,7 +162,7 @@ const readEventsBefore = async (ex: Queryable, streamId: string, before: bigint)
 /**
  * Applies events of one stream to one document, in a transaction.
  *
- * The document keeps the version of every stream that fed it (`hermes_projection_versions`), so an event at or below
+ * The document keeps the version of every stream that fed it (the `_versions` table of the projection), so an event at or below
  * that version was already applied and is skipped: a replay or a redelivery does not change the document. A document
  * that `evolve` turns into `null` is deleted, and its versions stay, so a replay does not bring it back.
  *
@@ -183,12 +180,12 @@ const applyToDocument = async (
     return
   }
 
-  const { name } = projection
+  const tables = projectionTables(projection)
   const { documentId, streamId } = target
-  const data = await lockDocument(ex, name, documentId, options)
+  const data = await lockDocument(ex, tables.documents, documentId, options)
   const [versions] = await ex.query<RowDataPacket[]>(
-    `SELECT \`version\` FROM \`${ProjectionVersionsTable}\` WHERE \`name\` = ? AND \`id\` = ? AND \`stream_id\` = ?`,
-    [name, documentId, streamId],
+    `SELECT \`version\` FROM \`${tables.versions}\` WHERE \`id\` = ? AND \`stream_id\` = ?`,
+    [documentId, streamId],
   )
   const version = versions.length ? toBigInt(versions[0].version) : 0n
   const catchUp =
@@ -200,7 +197,7 @@ const applyToDocument = async (
 
   if (!fresh.length || (!handled.length && data === null)) {
     if (data === null) {
-      await ex.query(`DELETE FROM \`${ProjectionsTable}\` WHERE \`name\` = ? AND \`id\` = ?`, [name, documentId])
+      await ex.query(`DELETE FROM \`${tables.documents}\` WHERE \`id\` = ?`, [documentId])
     }
 
     // A single-stream document without handled events yet still records how far its stream was read, so that the
@@ -208,7 +205,8 @@ const applyToDocument = async (
     if (fresh.length && projection.isSingleStream) {
       await setVersion(
         ex,
-        { name, id: documentId, streamId },
+        tables.versions,
+        { id: documentId, streamId },
         fresh[fresh.length - 1].streamPosition,
         versions.length > 0,
       )
@@ -220,16 +218,21 @@ const applyToDocument = async (
   const state = applyProjection(projection, data, fresh)
 
   if (state === null || state === undefined) {
-    await ex.query(`DELETE FROM \`${ProjectionsTable}\` WHERE \`name\` = ? AND \`id\` = ?`, [name, documentId])
+    await ex.query(`DELETE FROM \`${tables.documents}\` WHERE \`id\` = ?`, [documentId])
   } else if (state !== data) {
-    await ex.query(`UPDATE \`${ProjectionsTable}\` SET \`data\` = CAST(? AS JSON) WHERE \`name\` = ? AND \`id\` = ?`, [
+    await ex.query(`UPDATE \`${tables.documents}\` SET \`data\` = CAST(? AS JSON) WHERE \`id\` = ?`, [
       JSON.stringify(state),
-      name,
       documentId,
     ])
   }
 
-  await setVersion(ex, { name, id: documentId, streamId }, fresh[fresh.length - 1].streamPosition, versions.length > 0)
+  await setVersion(
+    ex,
+    tables.versions,
+    { id: documentId, streamId },
+    fresh[fresh.length - 1].streamPosition,
+    versions.length > 0,
+  )
 }
 
 /**
@@ -272,16 +275,27 @@ const applyToProjection = async (
   }
 }
 
+const NoSuchTableErrno = 1146
+
 /**
  * Reads a document of a projection.
  *
- * @returns The document and, for a single-stream projection, the version of its stream; `null` when there is none
+ * @returns The document and, for a single-stream projection, the version of its stream; `null` when there is none,
+ * also when the tables of the projection do not exist yet
  */
 const readDocument = async <State>(ex: Queryable, projection: HermesProjection<State, Event>, id: string) => {
-  const [rows] = await ex.query<RowDataPacket[]>(
-    `SELECT \`data\` FROM \`${ProjectionsTable}\` WHERE \`name\` = ? AND \`id\` = ?`,
-    [projection.name, id],
-  )
+  const tables = projectionTables(projection)
+  let rows: RowDataPacket[]
+
+  try {
+    ;[rows] = await ex.query<RowDataPacket[]>(`SELECT \`data\` FROM \`${tables.documents}\` WHERE \`id\` = ?`, [id])
+  } catch (error) {
+    if (errnoOf(error) === NoSuchTableErrno) {
+      return null
+    }
+
+    throw error
+  }
 
   if (!rows.length || rows[0].data === null) {
     return null
@@ -292,8 +306,8 @@ const readDocument = async <State>(ex: Queryable, projection: HermesProjection<S
   }
 
   const [versions] = await ex.query<RowDataPacket[]>(
-    `SELECT \`version\` FROM \`${ProjectionVersionsTable}\` WHERE \`name\` = ? AND \`id\` = ? AND \`stream_id\` = ?`,
-    [projection.name, id, id],
+    `SELECT \`version\` FROM \`${tables.versions}\` WHERE \`id\` = ? AND \`stream_id\` = ?`,
+    [id, id],
   )
 
   return { data: rows[0].data as State, version: versions.length ? toBigInt(versions[0].version) : 0n }

@@ -3,6 +3,18 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# Unreleased
+
+### Features
+
+- **Every projection has its own tables**: `hermes_projection_<name>` for the documents (`id`, `data`, `created_at`, `updated_at`) and `hermes_projection_<name>_versions` for the version of every stream that fed a document, instead of the shared `hermes_projections` and `hermes_projection_versions`. `projectionTables(projection)` returns their names; a name that is not lowercase `[a-z0-9_]` (up to 37 characters) gets 8 characters of its SHA-256, so that two projections never share a table.
+- The tables are created when they are missing, with `CREATE TABLE IF NOT EXISTS` on a connection of their own (DDL commits, so never in a transaction), and never changed: `eventStore.init()` creates the tables of all the projections given to `createEventStore`, the first append creates those of the inline projections, `createProjectionConsumer` creates those of its projection on start (unless `migrate: false`), and `migrate(pool, { eventStore: true, projections })` creates them in a deployment pipeline. Call `init()` on start when you append in a transaction of the application (`tx`): a table created after that transaction began cannot be read in it (`ER_TABLE_DEF_CHANGED`).
+- `readProjection` returns `null` when the tables of the projection do not exist yet.
+
+### BREAKING CHANGES
+
+- Event store migration 3 drops `hermes_projections` and `hermes_projection_versions` with their documents, and removes the checkpoints of the async projections (`projection:*`), so that their consumers build them again from the first event. A single-stream inline projection catches up on the next append to a stream; the documents of a multi-stream inline projection are not built again.
+
 # [1.0.0-alpha.24](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.23...v1.0.0-alpha.24) (2026-11-05)
 
 It needs `@chassisjs/hermes` `~1.0.0-alpha.24` (`defineHermesReaction`).

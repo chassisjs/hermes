@@ -88,7 +88,7 @@ type EventStoreConsumer = {
  * Calling it again returns the same promise.
  */
 const startConsumer = async (
-  params: EventStoreConsumerBaseParams & { consumerName: string },
+  params: EventStoreConsumerBaseParams & { consumerName: string; projections?: readonly HermesProjection<any, any>[] },
   createPublish: (
     getPool: () => ReturnType<typeof createPollingPool>,
   ) => (message: PolledMessage<RecordedEvent>) => Promise<void>,
@@ -113,7 +113,7 @@ const startConsumer = async (
     })
 
     if (params.migrate !== false) {
-      await migrate(pollingPool, { eventStore: true })
+      await migrate(pollingPool, { eventStore: true, projections: params.projections })
     }
 
     await store.initialize()
@@ -216,7 +216,7 @@ const describeError = (error: unknown) =>
  * the event to `hermes_dead_letters`, runs `onGiveUp` and moves the checkpoint in a new transaction instead of failing.
  */
 const createTransactionalConsumer = (
-  params: EventStoreConsumerBaseParams,
+  params: EventStoreConsumerBaseParams & { projections?: readonly HermesProjection<any, any>[] },
   consumerName: string,
   shouldHandle: (event: RecordedEvent) => boolean,
   handle: (connection: PoolConnection, event: RecordedEvent) => Promise<void>,
@@ -308,13 +308,15 @@ const createTransactionalConsumer = (
 /**
  * Creates a consumer that updates an async projection.
  *
- * Every event updates the documents and the checkpoint of its stream in one transaction, and every document keeps the
- * version of every stream that fed it, so a replay or a redelivery does not apply an event twice. A failing `evolve`
+ * `start()` creates the missing tables of the projection (unless `migrate` is `false`; then run
+ * `migrate(pool, { eventStore: true, projections })` yourself). Every event updates the documents and the checkpoint
+ * of its stream in one transaction, and every document keeps the version of every stream that fed it, so a replay or
+ * a redelivery does not apply an event twice. A failing `evolve`
  * changes nothing and is retried later; the rest of its stream waits.
  */
 const createProjectionConsumer = (params: ProjectionConsumerParams): EventStoreConsumer =>
   createTransactionalConsumer(
-    params,
+    { ...params, projections: [params.projection] },
     `projection:${params.projection.name}`,
     () => true,
     (connection, event) => applyToProjection(connection, params.projection, [event], { readCommitted: true }),

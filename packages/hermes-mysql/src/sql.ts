@@ -1,4 +1,5 @@
-import { assert } from '@chassisjs/hermes'
+import { assert, Duration } from '@chassisjs/hermes'
+import { setTimeout } from 'node:timers/promises'
 import { createPool } from 'mysql2'
 import { type Pool, type PoolConnection, type PoolOptions } from 'mysql2/promise'
 import { type QueryExecutor } from './types.js'
@@ -11,6 +12,28 @@ const DefaultPollingConnectionLimit = 3
 const PollingProgramName = 'hermes-polling'
 const LockWaitTimeoutSeconds = 5
 const RetriedErrnos = [1205, 1213]
+/** How long DDL waits for the lock of a table: a waiting DDL stops the queries of the application on that table. */
+const TableLockWaitTimeoutSeconds = 5
+const TableLockAttempts = 10
+const LockWaitTimeoutErrno = 1205
+
+/**
+ * Runs a statement, e.g. DDL, again a second later when it timed out waiting for the lock of a table, up to about
+ * ten times.
+ */
+const retryOnTableLockTimeout = async <T>(statement: () => Promise<T>): Promise<T> => {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await statement()
+    } catch (error) {
+      if ((error as { errno?: number }).errno !== LockWaitTimeoutErrno || attempt >= TableLockAttempts) {
+        throw error
+      }
+
+      await setTimeout(Duration.ofSeconds(1).ms)
+    }
+  }
+}
 
 /**
  * Creates the pool that Hermes polls the outbox with.
@@ -155,6 +178,8 @@ const insertRowsAtomically = async (
 }
 
 export {
+  retryOnTableLockTimeout,
+  TableLockWaitTimeoutSeconds,
   createPollingPool,
   DefaultPollingConnectionLimit,
   PollingProgramName,

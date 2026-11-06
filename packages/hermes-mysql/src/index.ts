@@ -35,4 +35,5 @@ export {
   type EventStorePollingStoreScope,
 } from './createEventStorePollingStore.js'
 export { createMutex, type Mutex } from './createMutex.js'
+export { projectionTables, type ProjectionTables } from './projectionTables.js'
 export { changedStreamsQuery } from './eventStoreSql.js'
