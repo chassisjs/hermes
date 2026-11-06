@@ -1,6 +1,6 @@
 {
   "name": "@chassisjs/hermes-mysql",
-  "version": "1.0.0-alpha.24",
+  "version": "1.0.0-alpha.25",
   "description": "Production-Ready TypeScript Outbox Pattern for MySQL",
   "scripts": {
     "build": "rollup -c",
