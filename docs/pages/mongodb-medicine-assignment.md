@@ -551,12 +551,11 @@ docker exec -it <container-id> mongosh --eval "rs.initiate()"
 
 Hermes MongoDB supports:
 
-- ✅ MongoDB **5.x.x**
-- ✅ MongoDB **6.x.x**
-- ✅ MongoDB **7.x.x**
-- ✅ MongoDB **8.0.0-rc.x**
+- ✅ MongoDB **7.0**
+- ✅ MongoDB **8.0**
+- ✅ MongoDB **9.0**
 
-Hermes MongoDB accepts any MongoDB 5.0 or newer. The basic scenarios are tested in CI against all the versions above. See the [test suite](https://github.com/chassisjs/hermes/blob/main/packages/hermes-mongodb/test/simple.test.ts) for details.
+These are the versions supported by MongoDB. The basic scenarios run in CI on each of them; see the [test suite](https://github.com/chassisjs/hermes/blob/main/packages/hermes-mongodb/test/simple.test.ts). Hermes MongoDB still starts on MongoDB 5.0 and 6.0 (and on AWS DocumentDB 5.0), but they are past their end of life and no longer tested. The `mongodb` driver can be 6.8 or newer, up to 7.x.
 
 ## Comparison: MongoDB vs PostgreSQL
 

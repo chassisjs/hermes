@@ -232,6 +232,23 @@ for (const message of unsentMessages) {
 }
 ```
 
+## The outbox collection grows
+
+Hermes never deletes the messages from `__outboxMessages`. To remove the sent ones, turn on `saveTimestamps` and add a [TTL index](https://www.mongodb.com/docs/manual/core/index-ttl/) on `sentAt`, e.g. a week:
+
+```javascript
+db.__outboxMessages.createIndex({ sentAt: 1 }, { expireAfterSeconds: 7 * 24 * 60 * 60 })
+```
+
+Messages that were never sent have no `sentAt`, so the index keeps them.
+
+## When the change stream ends
+
+The MongoDB driver resumes a change stream after network errors on its own. When the server ends the stream for good, Hermes opens it again:
+
+- after an `invalidate` (e.g. the outbox collection was dropped), from that event, so it goes on with the new messages;
+- after an error the driver cannot resume from, from the last sent message, reporting the error with `onDbError` every `waitAfterFailedPublishMs`. If the resume token is no longer in the oplog, it keeps failing: see above how to prevent it.
+
 ## MongoDB vs PostgreSQL: Retention Comparison
 
 | Aspect                          | MongoDB (Oplog)                           | PostgreSQL (WAL)                              |

@@ -1,19 +1,6 @@
-import { assert, parseSemVer } from '@chassisjs/hermes'
-
 const OutboxMessagesCollectionName = '__outboxMessages'
 const OutboxConsumersCollectionName = '__outboxConsumers'
-const SupportedMongoVersions = ['5.0.0', '6.0.0', '7.0.0', '8.0.0-rc.18'] as const
-const SupportedMajorMongoVersions = SupportedMongoVersions.map((semver) => {
-  const { major } = parseSemVer(semver)
+/** The oldest major version of MongoDB with the Change Streams that Hermes needs (also AWS DocumentDB 5.0). */
+const MinimumMongoMajorVersion = 5
 
-  assert(major)
-
-  return major
-})
-
-export {
-  OutboxConsumersCollectionName,
-  OutboxMessagesCollectionName,
-  SupportedMajorMongoVersions,
-  SupportedMongoVersions,
-}
+export { MinimumMongoMajorVersion, OutboxConsumersCollectionName, OutboxMessagesCollectionName }

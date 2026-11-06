@@ -41,9 +41,6 @@ const getConsumer = async (db: Db, partitionKey: string): Promise<ConsumerActive
       consumer.lastProcessedId = lastProcessedId
       consumer.resumeToken = resumeToken
     },
-    async delete() {
-      await consumers.deleteOne({ _id: that._id })
-    },
     ...consumer,
   }
 

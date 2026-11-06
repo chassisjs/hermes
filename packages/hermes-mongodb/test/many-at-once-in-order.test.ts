@@ -2,14 +2,14 @@ import { Duration } from '@chassisjs/hermes'
 import { describe, expect, jest, test } from '@jest/globals'
 import { ObjectId } from 'mongodb'
 import nodeTimersPromises from 'node:timers/promises'
-import { OutboxConsumersCollectionName, OutboxMessagesCollectionName, SupportedMongoVersions } from '../src/consts.js'
+import { OutboxConsumersCollectionName, OutboxMessagesCollectionName } from '../src/consts.js'
 import { createOutboxConsumer } from '../src/index.js'
 import { generateEvent, type MedicineEvent } from './events.js'
-import { mongodb } from './mongodb.js'
+import { mongodb, TestedMongoVersions } from './mongodb.js'
 
 jest.setTimeout(Duration.ofMinutes(5).ms)
 
-describe.each(SupportedMongoVersions)('Basic tests for MongoDB %s', (version) => {
+describe.each(TestedMongoVersions)('Basic tests for MongoDB %s', (version) => {
   test('Sending many events at once in order works', async () => {
     const publishEventStub = jest.fn<() => Promise<void>>().mockResolvedValue(undefined)
 

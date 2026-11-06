@@ -43,8 +43,9 @@ hermes/
 
 - **Location:** `packages/hermes-mongodb`
 - **Description:** MongoDB-specific Outbox Pattern implementation
-- **Dependencies:** `whatwg-url@^16.0.1`
-- **Peer Dependencies:** `@chassisjs/hermes@~1.0.0-alpha.15`, `mongodb@>= 6.8.0 || < 7.0.0`
+- **Dependencies:** none
+- **Peer Dependencies:** `@chassisjs/hermes@~1.0.0-alpha.15`, `mongodb@>=6.8.0 <8`
+- **Tests:** `mongodb-memory-server`, one replica set per version. The basic scenarios run on every version in `TestedMongoVersions` (`test/mongodb.ts`): the major versions that MongoDB supports (7.0, 8.0, 9.0). The code accepts MongoDB 5.0+ (`MinimumMongoMajorVersion`), also because of AWS DocumentDB 5.0
 - **Node:** `>=18.20.3` (`engines`)
 
 #### @chassisjs/hermes-mysql
@@ -424,8 +425,7 @@ The project uses:
     │   └── mysql2@~3.24.6
     │
     ├── @chassisjs/hermes-mongodb (depends on core)
-    │   ├── whatwg-url@^16.0.1
-    │   └── mongodb@>= 6.8.0 (peer)
+    │   └── mongodb@>=6.8.0 <8 (peer)
     │
     └── @chassisjs/hermes-postgresql (depends on core)
         ├── fp-ts@~2.16.11

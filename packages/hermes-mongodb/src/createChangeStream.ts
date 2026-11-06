@@ -1,25 +1,27 @@
-import { Collection, type ResumeToken } from 'mongodb'
-import { type PipelineStage } from 'mongoose'
+import { type Collection, type Document, type ResumeToken } from 'mongodb'
 import { type OutboxMessageModel, type OutboxMessageStream } from './typings.js'
-import { ChangeStreamFullDocumentValuePolicy } from './versionPolicies.js'
 
+/**
+ * Watches the inserts of the outbox messages of a partition. An insert always carries the whole document, so the
+ * stream needs no `fullDocument` lookup.
+ *
+ * @param resumeToken - Start after this event of the stream (`startAfter`, so it also works after an `invalidate`)
+ */
 const createChangeStream = <Event>(
-  getFullDocumentValue: ChangeStreamFullDocumentValuePolicy,
   messages: Collection<OutboxMessageModel<Event>>,
   partitionKey: string,
   resumeToken?: ResumeToken,
 ) => {
-  const pipeline: PipelineStage[] = [
+  const pipeline: Document[] = [
     {
-      $match: <Partial<OutboxMessageStream<Event>>>{
-        operationType: 'insert',
-        'fullDocument.partitionKey': partitionKey,
+      $match: {
+        $or: [{ operationType: 'insert', 'fullDocument.partitionKey': partitionKey }, { operationType: 'invalidate' }],
       },
     },
   ]
+
   return messages.watch<OutboxMessageModel<Event>, OutboxMessageStream<Event>>(pipeline, {
-    fullDocument: getFullDocumentValue(),
-    startAfter: resumeToken,
+    startAfter: resumeToken ?? undefined,
   })
 }
 

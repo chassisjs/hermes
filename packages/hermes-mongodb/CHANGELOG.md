@@ -3,6 +3,24 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# Unreleased
+
+### Bug Fixes
+
+- `stop()` waits for the event being published and saves its position; an event that keeps failing stops being retried.
+- The consumer no longer stops for good when the server ends the change stream: after an `invalidate` (e.g. a dropped outbox collection) it goes on from that event, after an error it cannot resume from it reports `onDbError` and opens the stream again from the last sent message.
+- `start()` registers its `SIGTERM`/`SIGINT` handlers once per consumer, not on every start.
+- `publish(event, session)` recognizes the callback by `typeof`, not by `instanceof ClientSession`, which failed with two copies of the `mongodb` driver.
+- `occurredAt` comes from `now()`, like `sentAt`.
+- The peer dependency on `mongodb` was `>= 6.8.0 || < 7.0.0`, which allowed any version; it is `>=6.8.0 <8` now (driver 7 is tested).
+- The published types imported `ts-essentials`, which is not a dependency.
+
+### Chores
+
+- Tests run on the MongoDB versions supported by MongoDB: 7.0, 8.0 and 9.0. They used to name 5.0, 6.0, 7.0 and 8.0.0-rc.18, but every scenario ran on the first server the test file started (5.0), so 6.0 and 8.0 were never tested. MongoDB 5.0 and 6.0 (and AWS DocumentDB 5.0) are still accepted, but no longer tested.
+- The `fullDocument` option of the change stream was dropped (an insert always carries the whole document), and with it the version policies; the package no longer depends on `whatwg-url`, and the tests are no longer published.
+- Docs: supported versions, cleaning up `__outboxMessages` with a TTL index on `sentAt`, what happens when the change stream ends.
+
 # [1.0.0-alpha.19](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.18...v1.0.0-alpha.19) (2026-11-02)
 
 ### Documentation

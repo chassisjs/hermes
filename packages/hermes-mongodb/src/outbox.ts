@@ -1,7 +1,7 @@
-import { CancellationPromise, addDisposeOnSigterm, assertDate, isNil, swallow } from '@chassisjs/hermes'
-import { ClientSession, Db, MongoClient, ObjectId } from 'mongodb'
+import { CancellationPromise, addDisposeOnSigterm, assertDate, isNil, noop, swallow } from '@chassisjs/hermes'
+import { ObjectId, type ChangeStreamDocument, type ClientSession, type ResumeToken } from 'mongodb'
 import { setTimeout } from 'node:timers/promises'
-import { noop } from 'ts-essentials'
+import { assertSupportedMongoVersion } from './assertSupportedMongoVersion.js'
 import { OutboxMessagesCollectionName } from './consts.js'
 import { createChangeStream } from './createChangeStream.js'
 import { ensureIndexes } from './ensureIndexes.js'
@@ -11,8 +11,9 @@ import {
   type OutboxConsumer,
   type OutboxEvent,
   type OutboxMessageModel,
+  type SaveWithEventCallback,
+  type Stop,
 } from './typings.js'
-import { generateVersionPolicies } from './versionPolicies.js'
 
 /**
  * Creates a new outbox consumer instance for MongoDB.
@@ -177,131 +178,128 @@ export const createOutboxConsumer = <Event extends OutboxEvent>(
   const onDbError = params.onDbError || noop
   const onFailedPublish = params.onFailedPublish || noop
   const messages = db.collection<OutboxMessageModel<Event>>(OutboxMessagesCollectionName)
-  const addMessage = async (event: Event | Event[], partitionKey: string, session?: ClientSession) =>
-    Array.isArray(event)
-      ? await messages.insertMany(
-          event.map((data) => ({
-            _id: new ObjectId(),
-            partitionKey,
-            occurredAt: new Date(),
-            data,
-          })),
-          { session },
-        )
-      : await messages.insertOne(
-          {
-            _id: new ObjectId(),
-            partitionKey,
-            occurredAt: new Date(),
-            data: event,
-          },
-          { session },
-        )
+  const addMessage = async (event: Event | Event[], partitionKey: string, session?: ClientSession) => {
+    const toMessage = (data: Event) => ({ _id: new ObjectId(), partitionKey, occurredAt: now(), data })
+
+    return Array.isArray(event)
+      ? await messages.insertMany(event.map(toMessage), { session })
+      : await messages.insertOne(toMessage(event), { session })
+  }
   // the promise will be resolved when `stop` method is called.
   // with that promise it's not possible to call the `start` for the second time,
   // which is important for stopping and resuming the outbox instance
   let shouldStopPromise: CancellationPromise<unknown> = CancellationPromise.resolved(undefined)
+  let stopCurrent: Stop | undefined
+  let isDisposedOnSigterm = false
 
   return {
     async start() {
-      const { supportedVersionCheckPolicy, changeStreamFullDocumentValuePolicy } = await generateVersionPolicies(db)
-
-      supportedVersionCheckPolicy()
-
+      await assertSupportedMongoVersion(db)
       await ensureIndexes(db)
 
       await shouldStopPromise
-      shouldStopPromise = new CancellationPromise()
+      const stopSignal = new CancellationPromise<unknown>()
+      shouldStopPromise = stopSignal
 
+      let stopping = false
       const consumer = await getConsumer(db, partitionKey)
-      const watchCursor = createChangeStream<Event>(
-        changeStreamFullDocumentValuePolicy,
-        messages,
-        partitionKey,
-        consumer.resumeToken,
-      )
-      const _waitUntilEventIsSent = async (event: Event) => {
-        let published = false
-
-        while (!watchCursor.closed) {
+      let resumeToken: ResumeToken | undefined = consumer.resumeToken ?? undefined
+      let cursor = createChangeStream<Event>(messages, partitionKey, resumeToken)
+      const waitOrStop = (ms: number) => Promise.race([setTimeout(ms), stopSignal])
+      const publishUntilSent = async (event: Event) => {
+        while (!stopping) {
           try {
             await _publish(event)
-
-            published = true
-            break
+            return true
           } catch (error) {
             onFailedPublish(error)
-            await setTimeout(waitAfterFailedPublishMs)
-            continue
+            await waitOrStop(waitAfterFailedPublishMs)
           }
         }
 
-        return published
+        return false
       }
       const watch = async () => {
-        while (!watchCursor.closed) {
+        while (!stopping) {
           try {
-            const result = await Promise.race([shouldStopPromise, watchCursor.hasNext()])
-            if (result === null) {
-              await watchCursor.close()
+            if (cursor.closed) {
+              // the server ended the stream (e.g. after an `invalidate` or an error it cannot resume from)
+              cursor = createChangeStream<Event>(messages, partitionKey, resumeToken)
+            }
+
+            const hasNext = await Promise.race([stopSignal, cursor.hasNext()])
+            if (hasNext === null) {
               break
             }
-            if (result) {
-              const { _id: resumeToken, operationType, fullDocument: message, documentKey } = await watchCursor.next()
-
-              if (operationType !== 'insert') {
-                continue
-              }
-
-              if (await _waitUntilEventIsSent(message.data)) {
-                if (saveTimestamps) {
-                  await db
-                    .collection<OutboxMessageModel<Event>>(OutboxMessagesCollectionName)
-                    .updateOne({ _id: message._id }, { $set: { sentAt: now() } })
-                  await consumer.update(documentKey._id, resumeToken)
-                } else {
-                  await consumer.update(documentKey._id, resumeToken)
-                }
-              }
+            if (!hasNext) {
+              continue
             }
+
+            const change = (await cursor.next()) as ChangeStreamDocument<OutboxMessageModel<Event>>
+
+            if (change.operationType === 'invalidate') {
+              resumeToken = change._id
+              await cursor.close()
+              continue
+            }
+            if (change.operationType !== 'insert') {
+              continue
+            }
+
+            const { fullDocument: message, documentKey } = change
+
+            if (!(await publishUntilSent(message.data))) {
+              break
+            }
+
+            resumeToken = change._id
+            if (saveTimestamps) {
+              await messages.updateOne({ _id: message._id }, { $set: { sentAt: now() } })
+            }
+            await consumer.update(documentKey._id, resumeToken)
           } catch (error) {
+            if (stopping) {
+              break
+            }
+
             onDbError(error)
-            await setTimeout(waitAfterFailedPublishMs)
+            await waitOrStop(waitAfterFailedPublishMs)
           }
         }
       }
-
-      watch()
-        .catch(console.error)
-        .finally(() => swallow(() => watchCursor.close()))
-
-      const stop = async function stop() {
-        if (!watchCursor.closed) {
-          shouldStopPromise.resolve(null)
-          await watchCursor.close()
-        }
+      const watching = watch()
+        .catch(onDbError)
+        .finally(() => swallow(() => cursor.close()))
+      const stop = async () => {
+        stopping = true
+        stopSignal.resolve(null)
+        await watching
       }
 
-      if (shouldDisposeOnSigterm) {
-        addDisposeOnSigterm(stop)
+      stopCurrent = stop
+
+      if (shouldDisposeOnSigterm && !isDisposedOnSigterm) {
+        isDisposedOnSigterm = true
+        addDisposeOnSigterm(async () => {
+          await stopCurrent?.()
+        })
       }
 
       return stop
     },
 
-    async publish(
-      event: Event | Event[],
-      sessionOrCallback?: ClientSession | ((session: ClientSession, db: Db, client: MongoClient) => Promise<void>),
-    ) {
-      if (sessionOrCallback instanceof ClientSession || !sessionOrCallback) {
-        await addMessage(event, partitionKey, sessionOrCallback)
-      } else {
+    async publish(event: Event | Event[], sessionOrCallback?: ClientSession | SaveWithEventCallback) {
+      if (typeof sessionOrCallback === 'function') {
+        const saveWithEvent = sessionOrCallback
+
         await client.withSession(async (session) => {
           await session.withTransaction(async (session) => {
-            await sessionOrCallback(session, db, client)
+            await saveWithEvent(session, db, client)
             await addMessage(event, partitionKey, session)
           })
         })
+      } else {
+        await addMessage(event, partitionKey, sessionOrCallback)
       }
     },
 

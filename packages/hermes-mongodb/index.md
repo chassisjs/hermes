@@ -6,12 +6,11 @@ npm i @chassisjs/hermes @chassisjs/hermes-mongodb
 
 ## 😍 Supported versions of the MongoDB
 
-➡️ **5**.x.x 😙\
-➡️ **6**.x.x 😚\
-➡️ **7**.x.x 😛\
-➡️ **8**.0.0-rc.x 😎
+➡️ **7**.0 😙\
+➡️ **8**.0 😚\
+➡️ **9**.0 😎
 
-If you don't believe it, check how these☝️ versions are covered by tests [here](https://github.com/chassisjs/hermes/blob/main/packages/hermes-mongodb/test/simple.test.ts#L14)!
+These are the versions supported by MongoDB, and the basic scenarios run on each of them in [the tests](https://github.com/chassisjs/hermes/blob/main/packages/hermes-mongodb/test/simple.test.ts). Hermes MongoDB still starts on MongoDB 5.0 and 6.0 (and on AWS DocumentDB 5.0), but they are past their end of life and no longer tested.
 
 ## 📒 API
 

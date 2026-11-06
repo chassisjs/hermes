@@ -1,5 +1,4 @@
 import { ClientSession, Db, MongoClient, ObjectId, type ChangeStreamInsertDocument, type ResumeToken } from 'mongodb'
-import { type AsyncOrSync } from 'ts-essentials'
 
 /**
  * MongoDB document model for outbox messages.
@@ -550,7 +549,7 @@ type ConsumerCreationParams<Event> = {
    * }
    * ```
    */
-  publish: (event: Event) => AsyncOrSync<void> | never
+  publish: (event: Event) => Promise<void> | void | never
 
   /**
    * Partition key for horizontal scaling.
