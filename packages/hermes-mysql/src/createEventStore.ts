@@ -11,7 +11,7 @@ import {
 import { randomUUID } from 'node:crypto'
 import { type Pool, type RowDataPacket } from 'mysql2/promise'
 import { DeadlockErrno, DuplicateEntryErrno, EventsTable, StreamsTable } from './eventStoreSql.js'
-import { ensureProjectionTables } from './projectionTables.js'
+import { assertProjectionTables, ensureProjectionTables, forgetProjectionTables } from './projectionTables.js'
 import {
   applyToProjection,
   EventColumns,
@@ -32,10 +32,13 @@ type EventStoreTransaction = Queryable
 type MySqlEventStore = EventStore<EventStoreTransaction> & {
   /**
    * Creates the missing tables of the projections given to {@link createEventStore} (see {@link projectionTables}),
-   * on its own connection of the pool, never in a transaction: MySQL commits every DDL statement. An append without
-   * it creates them before its first use, but an append in a transaction of the application (`tx`) should not be
-   * the first: a table created after its transaction began cannot be read in `REPEATABLE READ` (`ER_TABLE_DEF_CHANGED`).
-   * So call it on start when you append with `tx`. Existing tables are never changed.
+   * on its own connection of the pool, never in a transaction: MySQL commits every DDL statement. Existing tables are
+   * never changed.
+   *
+   * An append without `tx` creates the tables of the inline projections before their first use. An append in a
+   * transaction of the application (`tx`) never creates them: it would need a second connection of the pool while the
+   * transaction holds one, and a table created after the transaction began cannot be read in it
+   * (`ER_TABLE_DEF_CHANGED`). It throws when they are missing, so call `init()` on start when you append with `tx`.
    */
   init(): Promise<void>
 
@@ -56,6 +59,7 @@ type MySqlEventStore = EventStore<EventStoreTransaction> & {
 }
 
 const OwnTransactionAttempts = 5
+const NoSuchTableErrno = 1146
 const Savepoint = 'hermes_append'
 
 const errnoOf = (error: unknown) => (error as { errno?: number }).errno
@@ -140,6 +144,12 @@ const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] 
 
   const inline = projections.filter(({ mode }) => mode === 'inline')
   const init = () => ensureProjectionTables(pool, projections)
+  // a table dropped after it was created is created again by the next append without `tx`
+  const forgetOnMissingTable = (error: unknown) => {
+    if (errnoOf(error) === NoSuchTableErrno) {
+      forgetProjectionTables(pool)
+    }
+  }
 
   const append = async (
     ex: Queryable,
@@ -258,11 +268,16 @@ const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] 
 
       const expectedVersion = options?.expectedVersion ?? 'any'
 
-      await ensureProjectionTables(pool, inline)
-
       if (options?.tx) {
-        return append(options.tx, streamId, events, expectedVersion, false)
+        await assertProjectionTables(pool, options.tx, inline)
+
+        return append(options.tx, streamId, events, expectedVersion, false).catch((error: unknown) => {
+          forgetOnMissingTable(error)
+          throw error
+        })
       }
+
+      await ensureProjectionTables(pool, inline)
 
       for (let attempt = 1; ; attempt++) {
         try {
@@ -274,6 +289,8 @@ const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] 
             },
           )
         } catch (error) {
+          forgetOnMissingTable(error)
+
           if (errnoOf(error) !== DeadlockErrno || attempt >= OwnTransactionAttempts) {
             throw error
           }

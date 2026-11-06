@@ -115,7 +115,10 @@ const eventCounter = defineHermesProjection<{ count: number }, SchedulingEvent>(
 const setUp = async (pool: Pool) => {
   await migrate(pool, { eventStore: true })
 
-  return createEventStore(pool, { projections: [occurrences] })
+  const eventStore = createEventStore(pool, { projections: [occurrences] })
+  await eventStore.init()
+
+  return eventStore
 }
 
 const positionsBy = (published: HermesEventEnvelope<SchedulingEvent>[], streamId: string) =>
@@ -1782,6 +1785,120 @@ describe('Projection tables', () => {
         { consumer_name: 'relay' },
       ])
     })
+  })
+  test('an append in a transaction never creates tables: it throws at once when they are missing', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool, { eventStore: true })
+      const eventStore = createEventStore(pool, { projections: [occurrences] })
+
+      await expect(
+        withTransaction(pool, (tx) =>
+          eventStore.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', FUTURE)], { tx }),
+        ),
+      ).rejects.toThrow(/Call init\(\) of the event store on start/)
+      expect(await projectionTablesIn(pool)).toEqual([])
+      expect(await eventStore.readStreamVersion('task-1')).toBe(0n)
+    })
+  })
+
+  test('an append in a transaction works without init() when the tables already exist', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool, { eventStore: true, projections: [occurrences] })
+      const eventStore = createEventStore(pool, { projections: [occurrences] })
+
+      await withTransaction(pool, (tx) =>
+        eventStore.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', FUTURE)], { tx }),
+      )
+
+      expect(await eventStore.readProjection(occurrences, 'task-1')).toMatchObject({ version: 1n })
+    })
+  })
+
+  test('an append without a transaction creates the tables again after they were dropped', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool, { eventStore: true })
+      const eventStore = createEventStore(pool, { projections: [occurrences] })
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', FUTURE)])
+      await pool.query(`DROP TABLE \`${projectionTables(occurrences).documents}\``)
+
+      await expect(eventStore.appendToStream<SchedulingEvent>('task-2', [scheduled('o-2', FUTURE)])).rejects.toThrow()
+      await eventStore.appendToStream<SchedulingEvent>('task-2', [scheduled('o-2', FUTURE)])
+
+      expect(await eventStore.readProjection(occurrences, 'task-2')).toMatchObject({ version: 1n })
+    })
+  })
+
+  test('an event that changes nothing in a single-stream document moves only its version', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      const eventStore = await setUp(pool)
+      const table = projectionTables(occurrences).documents
+      const row = () =>
+        select<Record<string, unknown>>(
+          pool,
+          `SELECT CAST(\`data\` AS CHAR) AS data, \`version\`, \`updated_at\` FROM \`${table}\``,
+        )
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', FUTURE)])
+      // a number above 2^53 would lose its precision on a rewrite through JavaScript
+      await pool.query(
+        `UPDATE \`${table}\` SET \`data\` = JSON_SET(\`data\`, '$.big', CAST('12345678901234567890' AS JSON))`,
+      )
+      const [before] = await row()
+
+      await setTimeout(10)
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a')])
+      const [after] = await row()
+
+      expect(after.data).toBe(before.data)
+      expect(after.updated_at).toEqual(before.updated_at)
+      expect(after.version).toBe('2')
+    })
+  })
+
+  test('a deleted single-stream document starts again from the initial state on its next handled event', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool, { eventStore: true })
+      const counter = defineHermesProjection<{ count: number } | null, SchedulingEvent>()
+        .ofName('notes_until_completed')
+        .ofDocumentType()
+        .ofEvents('NoteAdded', 'TaskCompleted')
+        .ofInitialState(() => ({ count: 0 }))
+        .ofEvolve((state, event) => (event.type === 'TaskCompleted' ? null : { count: (state?.count ?? 0) + 1 }))
+        .inline()
+        .done()
+      const eventStore = createEventStore(pool, { projections: [counter] })
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a'), note('b'), completed('o-1')])
+      expect(await eventStore.readProjection(counter, 'task-1')).toBeNull()
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('c')])
+      expect(await eventStore.readProjection(counter, 'task-1')).toEqual({ data: { count: 1 }, version: 4n })
+    })
+  })
+
+  test('creating the tables does not wait for a transaction that reads them', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool, { eventStore: true, projections: [occurrences] })
+
+      await withTransaction(pool, async (tx) => {
+        await tx.query(`SELECT COUNT(*) FROM \`${projectionTables(occurrences).documents}\``)
+
+        const startedAt = Date.now()
+        await migrate(pool, { eventStore: true, projections: [occurrences] })
+        await createEventStore(pool, { projections: [occurrences] }).init()
+
+        expect(Date.now() - startedAt).toBeLessThan(3000)
+      })
+    })
+  })
+
+  test('the consumer names of projections and reactions are reserved', () => {
+    for (const consumerName of ['projection:mine', 'reaction:mine']) {
+      expect(() => createEventStoreConsumer({ getOptions: () => ({}), consumerName, publish: () => {} })).toThrow(
+        /cannot start with projection: or reaction:/,
+      )
+    }
   })
 })
 

@@ -56,7 +56,10 @@ type EventStoreConsumerBaseParams = {
 }
 
 type EventStoreConsumerParams<E extends Event> = EventStoreConsumerBaseParams & {
-  /** The name of the consumer: it has its own checkpoint in every stream (at most 250 characters). */
+  /**
+   * The name of the consumer: it has its own checkpoint in every stream (at most 250 characters, not starting with
+   * `projection:` or `reaction:`).
+   */
   consumerName: string
   /** Publishes an event, e.g. to a message broker. Throw to publish it again later; its stream waits until then. */
   publish: (event: HermesEventEnvelope<E>) => Promise<void> | void
@@ -136,6 +139,9 @@ const startConsumer = async (
   }
 }
 
+/** The prefixes of the consumers of projections and reactions; migrations may reset all the consumers of a prefix. */
+const ReservedConsumerPrefixes = ['projection:', 'reaction:']
+
 const assertConsumerName = (consumerName: string) =>
   assert(
     typeof consumerName === 'string' && consumerName.length > 0 && consumerName.length <= 250,
@@ -150,6 +156,10 @@ const assertConsumerName = (consumerName: string) =>
  */
 const createEventStoreConsumer = <E extends Event = Event>(params: EventStoreConsumerParams<E>): EventStoreConsumer => {
   assertConsumerName(params.consumerName)
+  assert(
+    !ReservedConsumerPrefixes.some((prefix) => params.consumerName.startsWith(prefix)),
+    `A consumer name cannot start with ${ReservedConsumerPrefixes.join(' or ')}: they name the consumers of projections and reactions.`,
+  )
 
   let isStarted = false
 

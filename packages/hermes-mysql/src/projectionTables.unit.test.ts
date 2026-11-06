@@ -38,6 +38,21 @@ describe('projectionTables', () => {
     })
   })
 
+  test('the documents of a projection never take the versions table of another one', () => {
+    const orders = projectionTables({ name: 'orders', isSingleStream: false })
+    const ordersVersions = projectionTables({ name: 'orders_versions', isSingleStream: true })
+
+    expect(ordersVersions.documents).not.toBe(orders.versions)
+    expect(ordersVersions.documents).toMatch(/^hermes_projection_orders_versions_[0-9a-f]{8}$/)
+  })
+
+  test('a plain name never looks like a hashed one', () => {
+    const hashed = projectionTables({ name: 'Orders', isSingleStream: true }).documents
+    const plain = hashed.slice('hermes_projection_'.length)
+
+    expect(projectionTables({ name: plain, isSingleStream: true }).documents).not.toBe(hashed)
+  })
+
   test('the same name always gives the same tables', () => {
     expect(projectionTables({ name: 'x:y', isSingleStream: false })).toEqual(
       projectionTables({ name: 'x:y', isSingleStream: false }),

@@ -268,16 +268,25 @@ const applyToSingleStreamDocument = async (
     return
   }
 
+  const nextVersion = fresh[fresh.length - 1].streamPosition.toString()
   const state = fresh.some((event) => projection.canHandle(event)) ? applyProjection(projection, data, fresh) : data
+  const deleted = state === null || state === undefined
+
+  if (state === data || (deleted && data === null)) {
+    // nothing to show changed: only the version moves, without rewriting the JSON
+    await ex.query(
+      `UPDATE \`${table}\` SET \`version\` = GREATEST(\`version\`, CAST(? AS UNSIGNED)), \`updated_at\` = \`updated_at\`
+       WHERE \`id\` = ?`,
+      [nextVersion, streamId],
+    )
+
+    return
+  }
 
   await ex.query(
     `UPDATE \`${table}\` SET \`data\` = CAST(? AS JSON), \`version\` = GREATEST(\`version\`, CAST(? AS UNSIGNED))
      WHERE \`id\` = ?`,
-    [
-      state === null || state === undefined ? null : JSON.stringify(state),
-      fresh[fresh.length - 1].streamPosition.toString(),
-      streamId,
-    ],
+    [deleted ? null : JSON.stringify(state), nextVersion, streamId],
   )
 }
 
