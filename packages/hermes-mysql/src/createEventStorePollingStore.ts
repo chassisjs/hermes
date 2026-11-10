@@ -191,7 +191,7 @@ const createEventStorePollingStore = (
           streamPosition: toBigInt(row.stream_position),
           eventId: String(row.event_id),
           recordedAt: row.recorded_at,
-        } as RecordedEvent,
+        },
       }))
     },
 

@@ -3,6 +3,19 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# Unreleased
+
+### Features
+
+- The checkpoint of a projection or reaction consumer moves only forward, in the transaction of the event: when another instance handled the event meanwhile (e.g. it took over the stream after the lease expired), the transaction is rolled back and the event is not handled again. So the documents of a projection and the work a reaction does in `tx` are never done twice, without versions kept per document. The checkpoint is also read (without a lock) before the handler, so in most such cases the handler, with its work outside of `tx`, does not run at all. A stream without a checkpoint row (e.g. removed by hand while the consumer ran) fails the event, so it is retried instead of skipped.
+- A table of a projection carries a comment with the name and the kind of its projection (`Hermes projection <name> (single-stream)` / `(multi-stream)`). Creating the tables fails when a table of that name exists with another comment: a table of the application, or the table of a projection that changed its kind.
+- Event store migration 1 no longer creates `hermes_projections` and `hermes_projection_versions`, which migration 3 drops.
+
+### BREAKING CHANGES
+
+- The table of a projection is named after it, without a prefix: `projectionTable(projection)` (instead of `projectionTables(projection).documents`) returns e.g. `open_occurrences`. A name that is not lowercase `[a-z0-9_]` (up to 64 characters, not starting with `hermes_` and not ending in `__` and 8 hexadecimal digits) gets `__` and 8 characters of its SHA-256. Event store migration 4 drops the tables `hermes_projection_*` of `1.0.0-alpha.25` (only those with the comment of alpha.25) and the checkpoints of all the async projections (`projection:*`), so that their consumers build them again in the new tables, which are still empty then: a consumer runs the migrations before it polls. No rolling deploy across this version.
+- A multi-stream projection (`ofId`) has no `_versions` table any more. Moving the checkpoint of its consumer back (e.g. to 0) applies the events again. To rebuild a projection, stop every instance of its consumer, and in one transaction empty its table and remove its checkpoints (`DELETE FROM hermes_subscriptions WHERE consumer_name = 'projection:<name>'`); a running instance would apply events between the two steps again.
+
 # [1.0.0-alpha.25](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.24...v1.0.0-alpha.25) (2026-11-06)
 
 ### Features

@@ -1,7 +1,7 @@
 import { applyProjection, type Event, type HermesProjection, type RecordedEvent } from '@chassisjs/hermes'
 import { type PoolConnection, type RowDataPacket } from 'mysql2/promise'
 import { DuplicateEntryErrno, EventsTable } from './eventStoreSql.js'
-import { projectionTables } from './projectionTables.js'
+import { projectionTable } from './projectionTables.js'
 
 /** A `mysql2` pool or connection. */
 type Queryable = Pick<PoolConnection, 'query'>
@@ -111,50 +111,6 @@ const lockDocument = async (
 }
 
 /**
- * Sets the version of a stream in a document. `exists` comes from the read of the version, so a missing row is
- * inserted instead of updated: an `UPDATE` of a missing row locks its gap in `REPEATABLE READ`, which would block
- * the documents of other streams.
- *
- * In `REPEATABLE READ`, that read sees the snapshot of the transaction, so a row committed after the snapshot looks
- * missing and its `INSERT` is a duplicate key. Then the row is updated, never below its version: the row of the
- * document is locked, so the positions applied now are above any version recorded before.
- */
-const setVersion = async (
-  ex: Queryable,
-  table: string,
-  key: { id: string; streamId: string },
-  version: bigint,
-  exists: boolean,
-) => {
-  const update = () =>
-    ex.query(
-      `UPDATE \`${table}\` SET \`version\` = GREATEST(\`version\`, CAST(? AS UNSIGNED))
-       WHERE \`id\` = ? AND \`stream_id\` = ?`,
-      [version.toString(), key.id, key.streamId],
-    )
-
-  if (exists) {
-    await update()
-
-    return
-  }
-
-  try {
-    await ex.query(`INSERT INTO \`${table}\` (\`id\`, \`stream_id\`, \`version\`) VALUES (?, ?, ?)`, [
-      key.id,
-      key.streamId,
-      version.toString(),
-    ])
-  } catch (error) {
-    if (errnoOf(error) !== DuplicateEntryErrno) {
-      throw error
-    }
-
-    await update()
-  }
-}
-
-/**
  * The events of a stream before a position, with a locking read (the latest committed rows, whatever the snapshot of
  * the transaction is). The row of the stream is locked by the append, so they do not change meanwhile.
  *
@@ -177,13 +133,12 @@ const readEventsBefore = async (ex: Queryable, streamId: string, before: bigint)
 /**
  * Applies events of one stream to one document, in a transaction.
  *
- * The document keeps the version of every stream that fed it (in its own row in a single-stream projection, in the
- * `_versions` table in a multi-stream one), so an event at or below that version was already applied and is skipped:
- * a replay or a redelivery does not change the document. A document that `evolve` turns into `null` is deleted, and
- * its versions stay, so a replay does not bring it back.
+ * A single-stream document keeps the version of its stream in its row, so an event at or below that version was
+ * already applied and is skipped: a replay or a redelivery does not change the document.
  *
- * A single-stream document that does not exist yet for a stream that has earlier events (e.g. the projection was
- * added to a running application) is built from all the events of the stream first, so it never misses them.
+ * A multi-stream document keeps no versions: an inline projection gets every event once, in the transaction of its
+ * append, and the consumer of an async one moves its checkpoint only forward in the transaction of the document, so the
+ * transaction that would apply an event again is rolled back. A document that `evolve` turns into `null` is deleted.
  */
 const applyToDocument = async (
   ex: Queryable,
@@ -196,50 +151,26 @@ const applyToDocument = async (
     return
   }
 
-  const tables = projectionTables(projection)
+  const table = projectionTable(projection)
   const { documentId, streamId } = target
 
-  if (tables.versions === null) {
-    await applyToSingleStreamDocument(ex, projection, tables.documents, streamId, events, options)
+  if (projection.isSingleStream) {
+    await applyToSingleStreamDocument(ex, projection, table, streamId, events, options)
 
     return
   }
 
-  const { data } = await lockDocument(ex, tables.documents, documentId, options, false)
-  const [versions] = await ex.query<RowDataPacket[]>(
-    `SELECT \`version\` FROM \`${tables.versions}\` WHERE \`id\` = ? AND \`stream_id\` = ?`,
-    [documentId, streamId],
-  )
-  const version = versions.length ? toBigInt(versions[0].version) : 0n
-  const fresh = events.filter(({ streamPosition }) => streamPosition > version)
-  const handled = fresh.filter((event) => projection.canHandle(event))
-
-  if (!fresh.length || (!handled.length && data === null)) {
-    if (data === null) {
-      await ex.query(`DELETE FROM \`${tables.documents}\` WHERE \`id\` = ?`, [documentId])
-    }
-
-    return
-  }
-
-  const state = applyProjection(projection, data, fresh)
+  const { data } = await lockDocument(ex, table, documentId, options, false)
+  const state = applyProjection(projection, data, events)
 
   if (state === null || state === undefined) {
-    await ex.query(`DELETE FROM \`${tables.documents}\` WHERE \`id\` = ?`, [documentId])
+    await ex.query(`DELETE FROM \`${table}\` WHERE \`id\` = ?`, [documentId])
   } else {
-    await ex.query(`UPDATE \`${tables.documents}\` SET \`data\` = CAST(? AS JSON) WHERE \`id\` = ?`, [
+    await ex.query(`UPDATE \`${table}\` SET \`data\` = CAST(? AS JSON) WHERE \`id\` = ?`, [
       JSON.stringify(state),
       documentId,
     ])
   }
-
-  await setVersion(
-    ex,
-    tables.versions,
-    { id: documentId, streamId },
-    fresh[fresh.length - 1].streamPosition,
-    versions.length > 0,
-  )
 }
 
 /**
@@ -338,15 +269,14 @@ const NoSuchTableErrno = 1146
  * Reads a document of a projection.
  *
  * @returns The document and, for a single-stream projection, the version of its stream; `null` when there is none,
- * also when the tables of the projection do not exist yet
+ * also when the table of the projection does not exist yet
  */
 const readDocument = async <State>(ex: Queryable, projection: HermesProjection<State, Event>, id: string) => {
-  const tables = projectionTables(projection)
   let rows: RowDataPacket[]
 
   try {
     ;[rows] = await ex.query<RowDataPacket[]>(
-      `SELECT ${tables.versions === null ? '`data`, `version`' : '`data`'} FROM \`${tables.documents}\` WHERE \`id\` = ?`,
+      `SELECT ${projection.isSingleStream ? '`data`, `version`' : '`data`'} FROM \`${projectionTable(projection)}\` WHERE \`id\` = ?`,
       [id],
     )
   } catch (error) {
@@ -363,7 +293,7 @@ const readDocument = async <State>(ex: Queryable, projection: HermesProjection<S
 
   return {
     data: rows[0].data as State,
-    version: tables.versions === null ? toBigInt(rows[0].version) : null,
+    version: projection.isSingleStream ? toBigInt(rows[0].version) : null,
   }
 }
 

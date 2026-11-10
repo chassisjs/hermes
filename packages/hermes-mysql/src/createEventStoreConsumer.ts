@@ -11,7 +11,7 @@ import {
   type RetryPolicy,
   usePartitionOrderingPolicy,
 } from '@chassisjs/hermes'
-import { type PoolConnection, type PoolOptions } from 'mysql2/promise'
+import { type PoolConnection, type PoolOptions, type ResultSetHeader, type RowDataPacket } from 'mysql2/promise'
 import { createEventStorePollingStore } from './createEventStorePollingStore.js'
 import { DeadLettersTable, SubscriptionsTable } from './eventStoreSql.js'
 import { migrate } from './migrate.js'
@@ -219,9 +219,22 @@ type GiveUp = {
 const describeError = (error: unknown) =>
   error instanceof Error ? (error.stack ?? `${error.name}: ${error.message}`) : String(error)
 
+/** Rolls back the transaction of an event that another instance handled meanwhile. */
+class AlreadyHandled extends Error {}
+
+const unlessAlreadyHandled = (error: unknown) => {
+  if (!(error instanceof AlreadyHandled)) {
+    throw error
+  }
+}
+
 /**
  * Creates a consumer that handles an event and moves its checkpoint past it in one transaction (`READ COMMITTED`), so
- * the work done in that transaction is never done twice. An event that `shouldHandle` rejects opens no transaction:
+ * the work done in that transaction is never done twice. The checkpoint moves only forward: when another instance
+ * handled the event meanwhile (e.g. it took over the stream after the lease of this one expired), the transaction is
+ * rolled back, and the event is not handled again. The checkpoint is also read before the handler, so in most such
+ * cases the handler does not run at all, also its work outside of the transaction; the conditional `UPDATE` at the end
+ * is the guarantee. An event that `shouldHandle` rejects opens no transaction:
  * the polling outbox moves the checkpoint past it. With `giveUp`, the attempt number `maxAttempts` that fails writes
  * the event to `hermes_dead_letters`, runs `onGiveUp` and moves the checkpoint in a new transaction instead of failing.
  */
@@ -234,13 +247,42 @@ const createTransactionalConsumer = (
 ): EventStoreConsumer => {
   assertConsumerName(consumerName)
 
-  const moveCheckpoint = (connection: PoolConnection, event: RecordedEvent) =>
-    connection.query(
-      `UPDATE \`${SubscriptionsTable}\`
-       SET \`attempts\` = 0, \`retry_at\` = NULL, \`version\` = GREATEST(\`version\`, CAST(? AS UNSIGNED))
-       WHERE \`consumer_name\` = ? AND \`stream_id\` = ?`,
-      [event.streamPosition.toString(), consumerName, event.streamId],
+  /**
+   * Throws `AlreadyHandled` when the checkpoint is at or past the event, and an error when the stream has no checkpoint
+   * (e.g. it was removed by hand while the consumer ran), so that the event is retried instead of skipped. The next
+   * poll creates the checkpoint again at 0 and handles the stream from its first event, so removing checkpoints without
+   * emptying the table doubles the documents of a multi-stream projection. A plain read: it locks nothing, so the
+   * handler does not hold the row of the checkpoint.
+   */
+  const assertNotHandled = async (connection: PoolConnection, event: RecordedEvent) => {
+    const [rows] = await connection.query<RowDataPacket[]>(
+      `SELECT \`version\` FROM \`${SubscriptionsTable}\` WHERE \`consumer_name\` = ? AND \`stream_id\` = ?`,
+      [consumerName, event.streamId],
     )
+
+    assert(rows.length > 0, `Consumer ${consumerName} has no checkpoint of stream ${event.streamId}.`)
+
+    if (BigInt(String(rows[0].version)) >= event.streamPosition) {
+      throw new AlreadyHandled()
+    }
+  }
+
+  // The row lock of the `UPDATE` makes a concurrent transaction of the same event wait, and then its `WHERE` sees the
+  // moved checkpoint (`READ COMMITTED` reads the latest committed row), so it changes no row and is rolled back.
+  const moveCheckpoint = async (connection: PoolConnection, event: RecordedEvent) => {
+    const position = event.streamPosition.toString()
+    const [result] = await connection.query<ResultSetHeader>(
+      `UPDATE \`${SubscriptionsTable}\`
+       SET \`attempts\` = 0, \`retry_at\` = NULL, \`version\` = CAST(? AS UNSIGNED)
+       WHERE \`consumer_name\` = ? AND \`stream_id\` = ? AND \`version\` < CAST(? AS UNSIGNED)`,
+      [position, consumerName, event.streamId, position],
+    )
+
+    if (result.affectedRows === 0) {
+      await assertNotHandled(connection, event)
+      throw new Error(`The checkpoint of stream ${event.streamId} of consumer ${consumerName} did not move.`)
+    }
+  }
 
   let isStarted = false
 
@@ -261,12 +303,17 @@ const createTransactionalConsumer = (
             await inTransaction(
               getPool(),
               async (connection) => {
+                await assertNotHandled(connection, event)
                 await handle(connection, event)
                 await moveCheckpoint(connection, event)
               },
               { readCommitted: true },
             )
           } catch (error) {
+            if (error instanceof AlreadyHandled) {
+              return
+            }
+
             if (!giveUp || message.attempts + 1 < giveUp.maxAttempts) {
               throw error
             }
@@ -276,6 +323,8 @@ const createTransactionalConsumer = (
               async (connection) => {
                 const attempts = message.attempts + 1
                 const description = describeError(error)
+
+                await assertNotHandled(connection, event)
 
                 await connection.query(
                   `INSERT INTO \`${DeadLettersTable}\`
@@ -299,7 +348,7 @@ const createTransactionalConsumer = (
                 await moveCheckpoint(connection, event)
               },
               { readCommitted: true },
-            )
+            ).catch(unlessAlreadyHandled)
           }
         })
 
@@ -320,9 +369,19 @@ const createTransactionalConsumer = (
  *
  * `start()` creates the missing tables of the projection (unless `migrate` is `false`; then run
  * `migrate(pool, { eventStore: true, projections })` yourself). Every event updates the documents and the checkpoint
- * of its stream in one transaction, and every document keeps the version of every stream that fed it, so a replay or
- * a redelivery does not apply an event twice. A failing `evolve`
- * changes nothing and is retried later; the rest of its stream waits.
+ * of its stream in one transaction, and the checkpoint moves only forward, so a redelivery, also by another instance,
+ * does not apply an event twice. A failing `evolve` changes nothing and is retried later; the rest of its stream waits.
+ *
+ * To rebuild the projection, stop every instance of its consumer, empty its table and remove its checkpoints in one
+ * transaction, and start the consumer again: a running instance would apply events between the two steps again.
+ *
+ * @example
+ * ```sql
+ * START TRANSACTION;
+ * DELETE FROM `open_occurrences`; -- projectionTable(openOccurrences)
+ * DELETE FROM `hermes_subscriptions` WHERE `consumer_name` = 'projection:open_occurrences'; -- 'projection:' + projection.name
+ * COMMIT;
+ * ```
  */
 const createProjectionConsumer = (params: ProjectionConsumerParams): EventStoreConsumer =>
   createTransactionalConsumer(

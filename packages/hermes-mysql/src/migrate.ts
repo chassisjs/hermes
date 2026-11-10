@@ -116,7 +116,7 @@ const applyMigrations = async (connection: PoolConnection, table: string, track:
  * With `eventStore`, it also creates the tables of the event store (`hermes_streams`, `hermes_events`,
  * `hermes_subscriptions`, `hermes_dead_letters`), whose versions are kept apart in `hermes_event_store_migrations`.
  * The event store is opt-in, so an application that uses only the outbox does not get its tables. With
- * `projections`, it also creates the missing tables of those projections (see {@link projectionTables}); it never
+ * `projections`, it also creates the missing tables of those projections (see {@link projectionTable}); it never
  * changes existing ones.
  *
  * @param pool - A `mysql2` pool

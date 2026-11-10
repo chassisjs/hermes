@@ -31,7 +31,7 @@ type EventStoreTransaction = Queryable
 
 type MySqlEventStore = EventStore<EventStoreTransaction> & {
   /**
-   * Creates the missing tables of the projections given to {@link createEventStore} (see {@link projectionTables}),
+   * Creates the missing tables of the projections given to {@link createEventStore} (see {@link projectionTable}),
    * on its own connection of the pool, never in a transaction: MySQL commits every DDL statement. Existing tables are
    * never changed.
    *
@@ -122,10 +122,9 @@ const lockStream = async (ex: Queryable, streamId: string, readCommitted: boolea
  * Every event gets a new `eventId` (a UUID); an id given by the caller is not used. For idempotent appends, use the
  * expected version.
  *
- * Every projection has its own tables, created when they are missing (see {@link MySqlEventStore.init}):
- * `hermes_projection_<name>` keeps the documents, and in a single-stream projection also the version of its stream.
- * A multi-stream projection keeps the version of every stream that fed a document in `hermes_projection_<name>_versions`.
- * Those rows are never removed: a document fed by a million streams has a million rows there.
+ * Every projection has its own table, named after it ({@link projectionTable}) and created when it is missing (see
+ * {@link MySqlEventStore.init}). It keeps the documents, and in a single-stream projection also the version of its
+ * stream.
  *
  * Its own transaction is tried again when MySQL picks it as the victim of a deadlock (e.g. when many instances create
  * the same stream at once). A deadlock in the transaction of the application rolls back the whole transaction, so it
@@ -145,9 +144,10 @@ const createEventStore = (pool: Pool, options?: { projections?: AnyProjection[] 
 
   const inline = projections.filter(({ mode }) => mode === 'inline')
   const init = () => ensureProjectionTables(pool, projections)
-  // a table dropped after it was created is created again by the next append without `tx`
+  // a table dropped after it was created is created again by the next append without `tx`; the tables of the
+  // projections share no prefix, so any missing table only resets what is known to exist
   const forgetOnMissingTable = (error: unknown) => {
-    if (errnoOf(error) === NoSuchTableErrno && String((error as Error).message).includes('hermes_projection_')) {
+    if (errnoOf(error) === NoSuchTableErrno) {
       forgetProjectionTables(pool)
     }
   }

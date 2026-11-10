@@ -20,7 +20,7 @@ import {
   fromInlineProjection,
   type HermesEventEnvelope,
   migrate,
-  projectionTables,
+  projectionTable,
 } from '../src/index.js'
 import { changedStreamsQuery } from '../src/eventStoreSql.js'
 import { createMySql } from './mysql.js'
@@ -155,6 +155,7 @@ describe('Migrations', () => {
         { version: 1, name: 'create the event store' },
         { version: 2, name: 'create the dead letters of the consumers' },
         { version: 3, name: 'drop the shared tables of the projections' },
+        { version: 4, name: 'drop the prefixed tables of the projections' },
       ])
       expect(await select(pool, 'SELECT `version` FROM `hermes_migrations`')).toEqual([{ version: 1 }])
     })
@@ -172,6 +173,7 @@ describe('Migrations', () => {
         { version: 1 },
         { version: 2 },
         { version: 3 },
+        { version: 4 },
       ])
       expect(await select(pool, 'SELECT `version` FROM `hermes_migrations`')).toEqual([{ version: 1 }])
     })
@@ -186,7 +188,7 @@ describe('Migrations', () => {
       }).start()
       await stop()
 
-      expect(await count(pool, 'SELECT COUNT(*) AS n FROM `hermes_event_store_migrations`')).toBe(3)
+      expect(await count(pool, 'SELECT COUNT(*) AS n FROM `hermes_event_store_migrations`')).toBe(4)
     })
   })
 })
@@ -616,7 +618,7 @@ describe('Command handler, state-stored', () => {
       await handle('task-1', schedule('o-1', FUTURE))
       // Only the document says that the occurrence is due; folding the events would say it is not.
       await pool.query(
-        `UPDATE \`${projectionTables(occurrences).documents}\` SET \`data\` = JSON_SET(\`data\`, '$.dueAt', ?) WHERE \`id\` = ?`,
+        `UPDATE \`${projectionTable(occurrences)}\` SET \`data\` = JSON_SET(\`data\`, '$.dueAt', ?) WHERE \`id\` = ?`,
         [PAST, 'task-1'],
       )
 
@@ -1300,8 +1302,55 @@ describe('Async projections', () => {
     })
   })
 
-  // Every document keeps the version of every stream that fed it, in the _versions table of the projection.
-  test('a multi-stream document is not changed by a replay of the events it already applied', async () => {
+  test('an event that another instance handled meanwhile is not applied again to a multi-stream document', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const table = projectionTable(eventCounter)
+      const checkpoint = () =>
+        count(pool, 'SELECT `version` AS n FROM `hermes_subscriptions` WHERE `consumer_name` = ? AND `stream_id` = ?', [
+          'projection:eventCounter',
+          'task-1',
+        ])
+
+      onDispose(
+        await createProjectionConsumer({
+          getOptions: () => options,
+          projection: eventCounter,
+          pollInterval: Duration.ofMiliseconds(50),
+        }).start(),
+      )
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a')])
+      await waitUntil(async () => (await checkpoint()) === 1)
+
+      const blocker = await pool.getConnection()
+
+      try {
+        // the consumer waits for the document while "another instance" handles the event and moves the checkpoint
+        await blocker.beginTransaction()
+        await blocker.query(`SELECT 1 FROM \`${table}\` WHERE \`id\` = 'all' FOR UPDATE`)
+        await eventStore.appendToStream<SchedulingEvent>('task-1', [note('b')])
+        // not information_schema.innodb_trx: it is cached, and polling it often keeps the cache from being refreshed
+        await waitUntil(
+          async () => (await count(pool, 'SELECT COUNT(*) AS n FROM performance_schema.data_lock_waits')) === 1,
+        )
+        await pool.query(
+          'UPDATE `hermes_subscriptions` SET `version` = 2 WHERE `consumer_name` = ? AND `stream_id` = ?',
+          ['projection:eventCounter', 'task-1'],
+        )
+        await blocker.commit()
+      } finally {
+        blocker.release()
+      }
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('c')])
+      await waitUntil(async () => (await checkpoint()) === 3)
+
+      expect(await eventStore.readProjection(eventCounter, 'all')).toEqual({ data: { count: 2 }, version: null })
+    })
+  })
+
+  test('a multi-stream projection keeps only its documents: moving its checkpoint back applies the events again', async () => {
     await mysql.withDatabase(async ({ pool, options, onDispose }) => {
       const eventStore = await setUp(pool)
       const checkpoints = () =>
@@ -1320,25 +1369,15 @@ describe('Async projections', () => {
       await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a'), note('b')])
       await eventStore.appendToStream<SchedulingEvent>('task-2', [note('c')])
       await waitUntil(async () => (await checkpoints()) === 3)
+      expect(await eventStore.readProjection(eventCounter, 'all')).toEqual({ data: { count: 3 }, version: null })
 
-      expect(
-        await select(
-          pool,
-          `SELECT \`stream_id\`, \`version\` FROM \`${projectionTables(eventCounter).versions}\` WHERE \`id\` = ? ORDER BY 1`,
-          ['all'],
-        ),
-      ).toEqual([
-        { stream_id: 'task-1', version: '2' },
-        { stream_id: 'task-2', version: '1' },
-      ])
-
+      // a rebuild empties the table together with the checkpoints
       await pool.query('UPDATE `hermes_subscriptions` SET `version` = 0 WHERE `consumer_name` = ?', [
         'projection:eventCounter',
       ])
       await waitUntil(async () => (await checkpoints()) === 3)
 
-      // one `version` means nothing for a document fed by many streams
-      expect(await eventStore.readProjection(eventCounter, 'all')).toEqual({ data: { count: 3 }, version: null })
+      expect(await eventStore.readProjection(eventCounter, 'all')).toEqual({ data: { count: 6 }, version: null })
     })
   })
 
@@ -1379,7 +1418,7 @@ describe('Async projections', () => {
       expect(
         await count(
           pool,
-          `SELECT COUNT(*) AS n FROM \`${projectionTables(openOccurrences).documents}\` WHERE \`data\` IS NOT NULL`,
+          `SELECT COUNT(*) AS n FROM \`${projectionTable(openOccurrences)}\` WHERE \`data\` IS NOT NULL`,
         ),
       ).toBe(0)
 
@@ -1672,8 +1711,13 @@ describe('Reactions', () => {
 
 describe('Projection tables', () => {
   const projectionTablesIn = async (pool: Pool) =>
-    (await select<Record<string, string>>(pool, "SHOW TABLES LIKE 'hermes\\_projection\\_%'"))
-      .map((row) => Object.values(row)[0])
+    (
+      await select<{ name: string }>(
+        pool,
+        "SELECT `table_name` AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_comment LIKE 'Hermes projection %'",
+      )
+    )
+      .map(({ name }) => name)
       .sort()
 
   test('init() creates the tables of every projection, each its own, and never changes existing ones', async () => {
@@ -1688,19 +1732,55 @@ describe('Projection tables', () => {
       await eventStore.init()
 
       expect(await projectionTablesIn(pool)).toEqual(
-        [
-          projectionTables(occurrences).documents,
-          projectionTables(eventCounter).documents,
-          projectionTables(eventCounter).versions,
-        ].sort(),
+        [projectionTable(occurrences), projectionTable(eventCounter)].sort(),
       )
       expect(
         await select(
           pool,
           'SELECT `table_comment` AS comment FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?',
-          [projectionTables(occurrences).documents],
+          [projectionTable(occurrences)],
         ),
-      ).toEqual([{ comment: 'Hermes projection occurrences' }])
+      ).toEqual([{ comment: 'Hermes projection occurrences (single-stream)' }])
+    })
+  })
+
+  test('a table of the application with the name of a projection is never written to', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool, { eventStore: true })
+      await pool.query('CREATE TABLE `occurrences` (`id` VARCHAR(250) NOT NULL, PRIMARY KEY (`id`))')
+      const eventStore = createEventStore(pool, { projections: [occurrences] })
+
+      await expect(eventStore.init()).rejects.toThrow(
+        'Table occurrences is not the table of the single-stream projection occurrences (it is not a table of Hermes: no comment).',
+      )
+      await expect(eventStore.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', FUTURE)])).rejects.toThrow(
+        'is not the table of the single-stream projection occurrences',
+      )
+      await expect(
+        withTransaction(pool, (tx) =>
+          eventStore.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', FUTURE)], { tx }),
+        ),
+      ).rejects.toThrow('is not the table of the single-stream projection occurrences')
+      expect(await eventStore.readStreamVersion('task-1')).toBe(0n)
+    })
+  })
+
+  test('a projection that changed its kind needs a new name', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool, { eventStore: true, projections: [occurrences] })
+      const multiStream = defineHermesProjection<Occurrence, SchedulingEvent>()
+        .ofName('occurrences')
+        .ofDocumentType()
+        .ofEvents('OccurrenceScheduled')
+        .ofInitialState(scheduling.initialState)
+        .ofEvolve(scheduling.evolve)
+        .ofId(() => 'all')
+        .inline()
+        .done()
+
+      await expect(createEventStore(pool, { projections: [multiStream] }).init()).rejects.toThrow(
+        "is not the table of the multi-stream projection occurrences (its comment is 'Hermes projection occurrences (single-stream)')",
+      )
     })
   })
 
@@ -1711,8 +1791,8 @@ describe('Projection tables', () => {
 
       await eventStore.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', FUTURE)])
 
-      expect(await projectionTablesIn(pool)).toEqual([projectionTables(occurrences).documents])
-      expect(await count(pool, `SELECT COUNT(*) AS n FROM \`${projectionTables(occurrences).documents}\``)).toBe(1)
+      expect(await projectionTablesIn(pool)).toEqual([projectionTable(occurrences)])
+      expect(await count(pool, `SELECT COUNT(*) AS n FROM \`${projectionTable(occurrences)}\``)).toBe(1)
     })
   })
 
@@ -1739,7 +1819,7 @@ describe('Projection tables', () => {
 
       await migrate(pool, { eventStore: true, projections: [occurrences] })
 
-      expect(await projectionTablesIn(pool)).toEqual([projectionTables(occurrences).documents])
+      expect(await projectionTablesIn(pool)).toEqual([projectionTable(occurrences)])
     })
   })
 
@@ -1757,9 +1837,7 @@ describe('Projection tables', () => {
 
       const stop = await createProjectionConsumer({ getOptions: () => options, projection: eventCounter }).start()
       await stop()
-      expect(await projectionTablesIn(pool)).toEqual(
-        [projectionTables(eventCounter).documents, projectionTables(eventCounter).versions].sort(),
-      )
+      expect(await projectionTablesIn(pool)).toEqual([projectionTable(eventCounter)])
     })
   })
 
@@ -1786,6 +1864,42 @@ describe('Projection tables', () => {
       ])
     })
   })
+  test('migration 4 drops the prefixed tables of the projections of 1.0.0-alpha.25, and only them', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool, { eventStore: true })
+      await pool.query('DELETE FROM `hermes_event_store_migrations` WHERE `version` = 4')
+
+      const create = (table: string, comment?: string) =>
+        pool.query(
+          `CREATE TABLE \`${table}\` (\`id\` VARCHAR(250) NOT NULL, PRIMARY KEY (\`id\`))${comment ? ' COMMENT = ?' : ''}`,
+          comment ? [comment] : [],
+        )
+
+      await create('hermes_projection_open_occurrences', 'Hermes projection open_occurrences')
+      await create('hermes_projection_event_counter__ce663b64', 'Hermes projection eventCounter')
+      await create('hermes_projection_event_counter__ce663b64_versions', 'Hermes projection eventCounter')
+      await create('hermes_projection_x__0123abcd', 'Hermes projection hermes_projection_x (single-stream)')
+      await create('hermes_projection_of_the_application')
+      await pool.query(
+        "INSERT INTO `hermes_subscriptions` (`consumer_name`, `stream_id`, `version`) VALUES ('projection:x', 'task-1', 3), ('relay', 'task-1', 3)",
+      )
+
+      await migrate(pool, { eventStore: true })
+
+      expect(
+        (
+          await select<{ name: string }>(
+            pool,
+            "SELECT `table_name` AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE 'hermes\\_projection\\_%' ORDER BY 1",
+          )
+        ).map(({ name }) => name),
+      ).toEqual(['hermes_projection_of_the_application', 'hermes_projection_x__0123abcd'])
+      expect(await select(pool, 'SELECT `consumer_name` FROM `hermes_subscriptions`')).toEqual([
+        { consumer_name: 'relay' },
+      ])
+    })
+  })
+
   test('an append in a transaction never creates tables: it throws at once when they are missing', async () => {
     await mysql.withDatabase(async ({ pool }) => {
       await migrate(pool, { eventStore: true })
@@ -1820,7 +1934,7 @@ describe('Projection tables', () => {
       const eventStore = createEventStore(pool, { projections: [occurrences] })
 
       await eventStore.appendToStream<SchedulingEvent>('task-1', [scheduled('o-1', FUTURE)])
-      await pool.query(`DROP TABLE \`${projectionTables(occurrences).documents}\``)
+      await pool.query(`DROP TABLE \`${projectionTable(occurrences)}\``)
 
       await expect(eventStore.appendToStream<SchedulingEvent>('task-2', [scheduled('o-2', FUTURE)])).rejects.toThrow()
       await eventStore.appendToStream<SchedulingEvent>('task-2', [scheduled('o-2', FUTURE)])
@@ -1841,7 +1955,7 @@ describe('Projection tables', () => {
         .inline()
         .done()
       const eventStore = createEventStore(pool, { projections: [completions] })
-      const table = projectionTables(completions).documents
+      const table = projectionTable(completions)
       const row = () =>
         select<Record<string, unknown>>(
           pool,
@@ -1891,7 +2005,7 @@ describe('Projection tables', () => {
       await migrate(pool, { eventStore: true, projections: [occurrences] })
 
       await withTransaction(pool, async (tx) => {
-        await tx.query(`SELECT COUNT(*) FROM \`${projectionTables(occurrences).documents}\``)
+        await tx.query(`SELECT COUNT(*) FROM \`${projectionTable(occurrences)}\``)
 
         const startedAt = Date.now()
         await migrate(pool, { eventStore: true, projections: [occurrences] })
@@ -2229,9 +2343,7 @@ describe('Deleted and not yet handled documents', () => {
 
       expect(await eventStore.readProjection(completions, 'task-1')).toBeNull()
       expect(
-        await select(pool, `SELECT \`version\` FROM \`${projectionTables(completions).documents}\` WHERE \`id\` = ?`, [
-          'task-1',
-        ]),
+        await select(pool, `SELECT \`version\` FROM \`${projectionTable(completions)}\` WHERE \`id\` = ?`, ['task-1']),
       ).toEqual([{ version: '3' }])
 
       await eventStore.appendToStream<SchedulingEvent>('task-1', [completed('o-1')])
