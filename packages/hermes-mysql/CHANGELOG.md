@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
-# Unreleased
+# [1.0.0-alpha.26](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.25...v1.0.0-alpha.26) (2026-11-10)
 
 ### Features
 
