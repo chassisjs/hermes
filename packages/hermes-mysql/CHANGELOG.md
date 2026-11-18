@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# Unreleased
+
+### Features
+
+- `createProjectionConsumer` takes `maxAttempts` and `onGiveUp`, like `createReactionConsumer`: the last failing attempt writes the event to `hermes_dead_letters` and skips it, in the transaction that moves the checkpoint, so an event whose `evolve` keeps failing no longer stops its stream forever. The documents never get the skipped event (a single-stream document records it as applied, so that its catch-up does not run it again; a document without a version first catches up on the events before it, and when one of those fails, the stream waits instead of losing its history), so rebuild the projection once the bug is fixed. `onGiveUp` can throw to keep the stream waiting. Without `maxAttempts`, a failing event is retried forever, as before.
+- `onFailedPublish` of the consumers of the event store gets the message too: `message.message` is the event and `message.attempts` the number of its failed attempts before this one, e.g. to raise an alarm after a few attempts.
+
 # [1.0.0-alpha.26](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.25...v1.0.0-alpha.26) (2026-11-10)
 
 ### Features

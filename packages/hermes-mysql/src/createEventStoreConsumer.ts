@@ -15,7 +15,7 @@ import { type PoolConnection, type PoolOptions, type ResultSetHeader, type RowDa
 import { createEventStorePollingStore } from './createEventStorePollingStore.js'
 import { DeadLettersTable, SubscriptionsTable } from './eventStoreSql.js'
 import { migrate } from './migrate.js'
-import { applyToProjection } from './projections.js'
+import { applyToProjection, skipInProjection } from './projections.js'
 import { createPollingPool, inTransaction } from './sql.js'
 import { type Stop } from './types.js'
 
@@ -49,8 +49,11 @@ type EventStoreConsumerBaseParams = {
    * document from all the events of its stream. @defaultValue `'beginning'`
    */
   startFrom?: 'beginning' | 'end'
-  /** Called when an event cannot be published. */
-  onFailedPublish?: (error: unknown) => void
+  /**
+   * Called on every failed attempt to handle an event, e.g. to raise an alarm: `message.message` is the event, and
+   * `message.attempts` the number of its failed attempts before this one.
+   */
+  onFailedPublish?: (error: unknown, message: PolledMessage<RecordedEvent>) => void
   /** Called when a query fails, e.g. when the database is not available. */
   onDbError?: (error: unknown) => void
 }
@@ -188,22 +191,15 @@ const createEventStoreConsumer = <E extends Event = Event>(params: EventStoreCon
   }
 }
 
-type ProjectionConsumerParams = EventStoreConsumerBaseParams & {
-  /** The async projection to update; its consumer is named `projection:<name>`. */
-  projection: HermesProjection<any, any>
-}
-
-type ReactionConsumerParams = EventStoreConsumerBaseParams & {
-  /** The reaction to run; its consumer is named `reaction:<name>`. */
-  reaction: HermesReaction<any, any>
+type GiveUpParams = {
   /**
-   * How many times to run the handler of an event before giving up on it: the event is then written to
-   * `hermes_dead_letters` and skipped, in the transaction that moves the checkpoint of the reaction past it.
+   * How many times to handle an event before giving up on it: the event is then written to `hermes_dead_letters` and
+   * skipped, in the transaction that moves the checkpoint of the consumer past it.
    * @defaultValue no limit: a failing event is retried until it succeeds, and the events after it in its stream wait
    */
   maxAttempts?: number
   /**
-   * Called when the reaction gives up on an event (needs `maxAttempts`), in the transaction (`tx`) that writes its
+   * Called when the consumer gives up on an event (needs `maxAttempts`), in the transaction (`tx`) that writes its
    * dead letter and moves the checkpoint past it. Return to skip the event and handle the next ones, or throw to keep
    * the stream waiting, e.g. until the bug is fixed: nothing is written then, and the event is retried after the `retry`
    * delay, the handler first.
@@ -211,9 +207,49 @@ type ReactionConsumerParams = EventStoreConsumerBaseParams & {
   onGiveUp?: (event: RecordedEvent, error: unknown, context: ReactionContext<PoolConnection>) => Promise<void> | void
 }
 
+type ProjectionConsumerParams = EventStoreConsumerBaseParams &
+  GiveUpParams & {
+    /** The async projection to update; its consumer is named `projection:<name>`. */
+    projection: HermesProjection<any, any>
+  }
+
+type ReactionConsumerParams = EventStoreConsumerBaseParams &
+  GiveUpParams & {
+    /** The reaction to run; its consumer is named `reaction:<name>`. */
+    reaction: HermesReaction<any, any>
+  }
+
 type GiveUp = {
   maxAttempts: number
-  onGiveUp?: (connection: PoolConnection, event: RecordedEvent, error: unknown) => Promise<void>
+  /** What the consumer does when it gives up, before it moves the checkpoint: e.g. `onGiveUp` of the application. */
+  beforeCheckpoint: (connection: PoolConnection, event: RecordedEvent, error: unknown) => Promise<void>
+}
+
+/**
+ * Checks `maxAttempts` and `onGiveUp`, and turns them into the `giveUp` of {@link createTransactionalConsumer}.
+ * `skip` runs first in the transaction of the dead letter, e.g. to mark the event as applied in a document.
+ */
+const giveUpOf = (
+  { maxAttempts, onGiveUp }: GiveUpParams,
+  skip?: (connection: PoolConnection, event: RecordedEvent) => Promise<void>,
+): GiveUp | undefined => {
+  assert(
+    maxAttempts === undefined || (Number.isInteger(maxAttempts) && maxAttempts >= 1),
+    'maxAttempts has to be an integer of at least 1.',
+  )
+  assert(onGiveUp === undefined || maxAttempts !== undefined, 'onGiveUp needs maxAttempts.')
+
+  if (maxAttempts === undefined) {
+    return undefined
+  }
+
+  return {
+    maxAttempts,
+    beforeCheckpoint: async (connection, event, error) => {
+      await skip?.(connection, event)
+      await onGiveUp?.(event, error, { tx: connection })
+    },
+  }
 }
 
 const describeError = (error: unknown) =>
@@ -236,7 +272,8 @@ const unlessAlreadyHandled = (error: unknown) => {
  * cases the handler does not run at all, also its work outside of the transaction; the conditional `UPDATE` at the end
  * is the guarantee. An event that `shouldHandle` rejects opens no transaction:
  * the polling outbox moves the checkpoint past it. With `giveUp`, the attempt number `maxAttempts` that fails writes
- * the event to `hermes_dead_letters`, runs `onGiveUp` and moves the checkpoint in a new transaction instead of failing.
+ * the event to `hermes_dead_letters`, runs `beforeCheckpoint` and moves the checkpoint in a new transaction instead of
+ * failing.
  */
 const createTransactionalConsumer = (
   params: EventStoreConsumerBaseParams & { projections?: readonly HermesProjection<any, any>[] },
@@ -344,7 +381,7 @@ const createTransactionalConsumer = (
                     description,
                   ],
                 )
-                await giveUp.onGiveUp?.(connection, event, error)
+                await giveUp.beforeCheckpoint(connection, event, error)
                 await moveCheckpoint(connection, event)
               },
               { readCommitted: true },
@@ -371,6 +408,13 @@ const createTransactionalConsumer = (
  * `migrate(pool, { eventStore: true, projections })` yourself). Every event updates the documents and the checkpoint
  * of its stream in one transaction, and the checkpoint moves only forward, so a redelivery, also by another instance,
  * does not apply an event twice. A failing `evolve` changes nothing and is retried later; the rest of its stream waits.
+ * Raise an alarm in `onFailedPublish`, which gets the event and the number of its failed attempts.
+ *
+ * With `maxAttempts`, the last failing attempt writes the event to `hermes_dead_letters` and skips it instead: the
+ * documents never get it (a single-stream document records it as applied, so that a catch-up does not run it again;
+ * a document without a version first catches up on the events before it, and when one of them fails, the stream
+ * waits, and then no dead letter is written: alert on `onFailedPublish`, e.g. when `message.attempts + 1 >=
+ * maxAttempts`), so rebuild the projection once the bug is fixed. `onGiveUp` can keep the stream waiting by throwing.
  *
  * To rebuild the projection, stop every instance of its consumer, empty its table and remove its checkpoints in one
  * transaction, and start the consumer again: a running instance would apply events between the two steps again.
@@ -389,6 +433,7 @@ const createProjectionConsumer = (params: ProjectionConsumerParams): EventStoreC
     `projection:${params.projection.name}`,
     () => true,
     (connection, event) => applyToProjection(connection, params.projection, [event], { readCommitted: true }),
+    giveUpOf(params, (connection, event) => skipInProjection(connection, params.projection, event)),
   )
 
 /**
@@ -415,34 +460,16 @@ const createProjectionConsumer = (params: ProjectionConsumerParams): EventStoreC
  * }).start()
  * ```
  */
-const createReactionConsumer = (params: ReactionConsumerParams): EventStoreConsumer => {
-  const { maxAttempts, onGiveUp } = params
-
-  assert(
-    maxAttempts === undefined || (Number.isInteger(maxAttempts) && maxAttempts >= 1),
-    'maxAttempts has to be an integer of at least 1.',
-  )
-  assert(onGiveUp === undefined || maxAttempts !== undefined, 'onGiveUp needs maxAttempts.')
-
-  return createTransactionalConsumer(
+const createReactionConsumer = (params: ReactionConsumerParams): EventStoreConsumer =>
+  createTransactionalConsumer(
     params,
     `reaction:${params.reaction.name}`,
     (event) => params.reaction.canHandle(event),
     async (connection, event) => {
       await params.reaction.handle(event, { tx: connection })
     },
-    maxAttempts === undefined
-      ? undefined
-      : {
-          maxAttempts,
-          onGiveUp: onGiveUp
-            ? async (connection, event, error) => {
-                await onGiveUp(event, error, { tx: connection })
-              }
-            : undefined,
-        },
+    giveUpOf(params),
   )
-}
 
 export {
   createEventStoreConsumer,

@@ -224,6 +224,37 @@ const applyToSingleStreamDocument = async (
 }
 
 /**
+ * Marks an event that a consumer gave up on as applied, without applying it: a single-stream document records its
+ * position, so that a later catch-up (which runs when the document has no version yet) does not run it again. A
+ * document without a version first catches up on the events before it, which the failed attempts tried to apply with
+ * it: if one of them is the one that fails, this fails too, and the stream waits, instead of losing its history. A
+ * multi-stream document keeps no versions: the checkpoint of the consumer skips the event.
+ */
+const skipInProjection = async (ex: Queryable, projection: AnyProjection, event: RecordedEvent<Event>) => {
+  if (!projection.isSingleStream) {
+    return
+  }
+
+  const table = projectionTable(projection)
+  const options = { readCommitted: true }
+  const { version } = await lockDocument(ex, table, event.streamId, options, true)
+
+  if (version === 0n && event.streamPosition > 1n) {
+    const before = await readEventsBefore(ex, event.streamId, event.streamPosition)
+
+    if (before.length) {
+      await applyToSingleStreamDocument(ex, projection, table, event.streamId, before, options)
+    }
+  }
+
+  await ex.query(
+    `UPDATE \`${table}\` SET \`version\` = GREATEST(\`version\`, CAST(? AS UNSIGNED)), \`updated_at\` = \`updated_at\`
+     WHERE \`id\` = ?`,
+    [event.streamPosition.toString(), event.streamId],
+  )
+}
+
+/**
  * Applies events of one stream, in order, to the documents of a projection.
  *
  * A single-stream projection has one document per stream, which gets all the events, so its version follows the
@@ -299,6 +330,7 @@ const readDocument = async <State>(ex: Queryable, projection: HermesProjection<S
 
 export {
   applyToProjection,
+  skipInProjection,
   EventColumns,
   readDocument,
   toBigInt,

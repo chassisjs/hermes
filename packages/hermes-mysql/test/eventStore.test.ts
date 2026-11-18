@@ -1432,6 +1432,172 @@ describe('Async projections', () => {
   })
 })
 
+describe('Async projections that give up', () => {
+  const notes = defineHermesProjection<{ texts: string[] }, SchedulingEvent>()
+    .ofName('notes_with_boom')
+    .ofDocumentType()
+    .ofEvents('NoteAdded')
+    .ofInitialState(() => ({ texts: [] }))
+    .ofEvolve((state, event) => {
+      if (event.type === 'NoteAdded' && event.data.text === 'boom') {
+        throw new Error('cannot add boom')
+      }
+
+      return event.type === 'NoteAdded' ? { texts: [...state.texts, event.data.text] } : state
+    })
+    .async()
+    .done()
+
+  test('after maxAttempts, a projection writes a dead letter, skips the event and goes on with its stream', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const onFailedPublish = jest.fn()
+      const checkpoint = (streamId: string) =>
+        count(pool, 'SELECT `version` AS n FROM `hermes_subscriptions` WHERE `consumer_name` = ? AND `stream_id` = ?', [
+          'projection:notes_with_boom',
+          streamId,
+        ])
+
+      onDispose(
+        await createProjectionConsumer({
+          getOptions: () => options,
+          projection: notes,
+          pollInterval: Duration.ofMiliseconds(50),
+          retry: () => Duration.ofMiliseconds(50),
+          maxAttempts: 2,
+          onFailedPublish,
+        }).start(),
+      )
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a'), note('boom'), note('after')])
+      // the first event of a stream fails: its document must not run it again in a catch-up
+      await eventStore.appendToStream<SchedulingEvent>('task-2', [note('boom')])
+      await waitUntil(async () => (await checkpoint('task-1')) === 3 && (await checkpoint('task-2')) === 1)
+      await eventStore.appendToStream<SchedulingEvent>('task-2', [note('x')])
+      await waitUntil(async () => (await checkpoint('task-2')) === 2)
+
+      expect(await eventStore.readProjection(notes, 'task-1')).toEqual({ data: { texts: ['a', 'after'] }, version: 3n })
+      expect(await eventStore.readProjection(notes, 'task-2')).toEqual({ data: { texts: ['x'] }, version: 2n })
+      expect(
+        await select(
+          pool,
+          'SELECT `consumer_name`, `stream_id`, `stream_position`, `attempts` FROM `hermes_dead_letters` ORDER BY 2',
+        ),
+      ).toEqual([
+        { consumer_name: 'projection:notes_with_boom', stream_id: 'task-1', stream_position: '2', attempts: 2 },
+        { consumer_name: 'projection:notes_with_boom', stream_id: 'task-2', stream_position: '1', attempts: 2 },
+      ])
+      expect(onFailedPublish).toHaveBeenCalledTimes(2)
+      expect(onFailedPublish).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'cannot add boom' }),
+        expect.objectContaining({
+          attempts: 0,
+          message: expect.objectContaining({ streamId: 'task-1', streamPosition: 2n }),
+        }),
+      )
+    })
+  })
+
+  test('a skip on a document without a version keeps the events before it', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const checkpoint = () =>
+        count(pool, 'SELECT `version` AS n FROM `hermes_subscriptions` WHERE `consumer_name` = ? AND `stream_id` = ?', [
+          'projection:notes_with_boom',
+          'task-1',
+        ])
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a')])
+      onDispose(
+        await createProjectionConsumer({
+          getOptions: () => options,
+          projection: notes,
+          startFrom: 'end',
+          pollInterval: Duration.ofMiliseconds(50),
+          retry: () => Duration.ofMiliseconds(50),
+          maxAttempts: 2,
+        }).start(),
+      )
+
+      // the document has no version yet, so the failed attempts also tried to catch up on note('a')
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('boom')])
+      await waitUntil(async () => (await checkpoint()) === 2)
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('after')])
+      await waitUntil(async () => (await checkpoint()) === 3)
+
+      expect(await eventStore.readProjection(notes, 'task-1')).toEqual({ data: { texts: ['a', 'after'] }, version: 3n })
+    })
+  })
+
+  test('when an event before the skipped one fails in the catch-up, the stream waits instead of losing it', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const onFailedPublish = jest.fn()
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('boom')])
+      onDispose(
+        await createProjectionConsumer({
+          getOptions: () => options,
+          projection: notes,
+          startFrom: 'end',
+          pollInterval: Duration.ofMiliseconds(50),
+          retry: () => Duration.ofMiliseconds(50),
+          maxAttempts: 1,
+          onFailedPublish,
+        }).start(),
+      )
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('x')])
+      await waitUntil(() => onFailedPublish.mock.calls.length >= 3)
+
+      expect(await eventStore.readProjection(notes, 'task-1')).toBeNull()
+      expect(await count(pool, 'SELECT COUNT(*) AS n FROM `hermes_dead_letters`')).toBe(0)
+      expect(
+        await count(
+          pool,
+          'SELECT `version` AS n FROM `hermes_subscriptions` WHERE `consumer_name` = ? AND `stream_id` = ?',
+          ['projection:notes_with_boom', 'task-1'],
+        ),
+      ).toBe(1)
+    })
+  })
+
+  test('onGiveUp of a projection can keep its stream waiting', async () => {
+    await mysql.withDatabase(async ({ pool, options, onDispose }) => {
+      const eventStore = await setUp(pool)
+      const onGiveUp = jest.fn(() => {
+        throw new Error('wait for the fix')
+      })
+
+      onDispose(
+        await createProjectionConsumer({
+          getOptions: () => options,
+          projection: notes,
+          pollInterval: Duration.ofMiliseconds(50),
+          retry: () => Duration.ofMiliseconds(50),
+          maxAttempts: 1,
+          onGiveUp,
+        }).start(),
+      )
+
+      await eventStore.appendToStream<SchedulingEvent>('task-1', [note('a'), note('boom'), note('after')])
+      await waitUntil(() => onGiveUp.mock.calls.length >= 2)
+
+      expect(await eventStore.readProjection(notes, 'task-1')).toEqual({ data: { texts: ['a'] }, version: 1n })
+      expect(await count(pool, 'SELECT COUNT(*) AS n FROM `hermes_dead_letters`')).toBe(0)
+    })
+  })
+
+  test('maxAttempts of a projection has to be a positive integer, and onGiveUp needs it', () => {
+    expect(() => createProjectionConsumer({ getOptions: () => ({}), projection: notes, maxAttempts: 1.5 })).toThrow(
+      'maxAttempts has to be an integer of at least 1.',
+    )
+    expect(() => createProjectionConsumer({ getOptions: () => ({}), projection: notes, onGiveUp: () => {} })).toThrow(
+      'onGiveUp needs maxAttempts.',
+    )
+  })
+})
+
 describe('Reactions', () => {
   type Billing = { type: 'InvoiceIssued'; data: { occurrenceId: string } }
 
