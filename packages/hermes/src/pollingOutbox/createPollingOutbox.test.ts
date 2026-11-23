@@ -469,6 +469,82 @@ describe('createPollingOutbox with usePartitionOrderingPolicy', () => {
     expect(Math.max(...lateness)).toBeLessThan(60)
   })
 
+  test('publishes after a claim that took longer than two thirds of the lease, once a renewal confirms it', async () => {
+    const { store, add, rows } = createInMemoryStore()
+    let renewals = 0
+
+    for (let id = 1; id <= 3; id++) {
+      add(id, `p${id}`)
+    }
+
+    const stop = createPollingOutbox({
+      ...fast,
+      lease: Duration.ofMiliseconds(90),
+      owner: 'first',
+      policy: usePartitionOrderingPolicy({
+        ...store,
+        claimPartitions: async (params) => {
+          const keys = await store.claimPartitions(params)
+          await setTimeout(80)
+          return keys
+        },
+        renewPartitions: async (params) => {
+          renewals++
+          return store.renewPartitions(params)
+        },
+      }),
+      publish: () => Promise.resolve(),
+    }).start()
+
+    try {
+      await waitUntil(() => rows.every(({ delivered }) => delivered))
+    } finally {
+      await stop()
+    }
+
+    expect(renewals).toBeGreaterThan(0)
+  })
+
+  test.each([
+    ['says that another instance took the partitions over', async () => 0],
+    [
+      'fails',
+      async () => {
+        throw new Error('renewal failed')
+      },
+    ],
+  ])('does not publish after a slow claim when the renewal %s', async (_, renewPartitions) => {
+    const { store, add } = createInMemoryStore()
+    let claims = 0
+    const published: PolledMessage<string>[] = []
+
+    add(1)
+
+    const stop = createPollingOutbox({
+      ...fast,
+      lease: Duration.ofMiliseconds(90),
+      owner: 'first',
+      policy: usePartitionOrderingPolicy({
+        ...store,
+        claimPartitions: async (params) => {
+          claims++
+          const keys = await store.claimPartitions(params)
+          await setTimeout(80)
+          return keys
+        },
+        renewPartitions,
+      }),
+      publish: async (message) => {
+        published.push(message)
+      },
+    }).start()
+
+    await waitUntil(() => claims >= 3)
+    await stop()
+
+    expect(published).toEqual([])
+  })
+
   test('stop waits for the message being published and releases the partitions', async () => {
     const { store, add, rows, partitions } = createInMemoryStore()
     let release = () => {}
