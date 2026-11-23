@@ -247,14 +247,15 @@ type ReplicationLag = {
    * The bytes of WAL between the current end of WAL and the position that the replication slot of the consumer
    * confirmed (`confirmed_flush_lsn`). It is read from the database, so it grows also when no instance consumes the
    * slot, and it is the WAL that PostgreSQL has to keep for the slot. It counts all the WAL of the database, not only
-   * the messages of the outbox. `null` when the slot does not exist.
+   * the messages of the outbox. `null` when the slot does not exist or has not confirmed any position yet.
    */
   walBytes: number | null
   /** Whether a process consumes the replication slot now. */
   isSlotActive: boolean
   /**
-   * The age of the oldest transaction that this instance received and did not publish yet, by its commit time.
-   * `null` when there is none. It is kept in the memory of this instance.
+   * The age of the oldest transaction that this instance received and did not publish yet, by its commit time (the
+   * clock of PostgreSQL) compared with the clock of the application, so a skew of the clocks shifts it; it is never
+   * below 0. `null` when there is none. It is kept in the memory of this instance.
    */
   oldestPendingAge: Duration | null
   /** The number of transactions that this instance received and did not publish yet. */

@@ -920,6 +920,31 @@ describe('onPoll', () => {
     expect(polls[0].claimDuration.ms).toBeGreaterThanOrEqual(75)
   })
 
+  test('a message that could not be marked as delivered is not counted as published', async () => {
+    const { store, add } = createInMemoryStore()
+    const polls: PollingOutboxPoll[] = []
+
+    add(1)
+
+    const stop = createPollingOutbox({
+      ...fast,
+      owner: 'first',
+      policy: usePartitionOrderingPolicy({
+        ...store,
+        markDelivered: async () => {
+          throw new Error('database is down')
+        },
+      }),
+      publish: () => Promise.resolve(),
+      onPoll: (poll) => polls.push(poll),
+    }).start()
+
+    await waitUntil(() => polls.length >= 1)
+    await stop()
+
+    expect(polls[0]).toMatchObject({ messages: 1, published: 0, failed: 0 })
+  })
+
   test('an error thrown by onPoll does not stop polling', async () => {
     const { store, add, rows } = createInMemoryStore()
 

@@ -166,7 +166,10 @@ type PollingOutboxLag = {
   pending: number
   /** `false` when there are more undelivered messages than were counted. */
   isPendingExact: boolean
-  /** The number of counted undelivered messages that failed at least once. */
+  /**
+   * The number of counted undelivered messages that failed at least once. When {@link isPendingExact} is `false`, it
+   * can include one message more than `pending`.
+   */
   failing: number
   /** The number of partitions with undelivered messages. */
   partitions: number
@@ -188,6 +191,10 @@ type PollingOutboxLagStore = {
 /**
  * What one poll of a polling outbox did. Given to {@link PollingOutboxParams.onPoll}, e.g. for the counters and
  * histograms of a metrics library.
+ *
+ * `messages` can be more than `published + failed`: a lane stops before its end after a failed message of
+ * `usePartitionOrderingPolicy`, when its claim is lost or not renewed for two thirds of the lease, when the outbox
+ * stops, or when the store fails.
  */
 type PollingOutboxPoll = {
   /** How long the claim took, reading the claimed messages included. */
@@ -198,7 +205,7 @@ type PollingOutboxPoll = {
   lanes: number
   /** The number of claimed messages. */
   messages: number
-  /** The number of published messages. */
+  /** The number of published messages that were marked as delivered. */
   published: number
   /** The number of messages that could not be published. */
   failed: number

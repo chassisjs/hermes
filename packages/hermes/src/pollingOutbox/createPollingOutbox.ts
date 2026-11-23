@@ -85,8 +85,8 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
 
       try {
         if (error === undefined) {
-          stats.published++
           await policy.markDelivered(message)
+          stats.published++
         } else {
           stats.failed++
           onFailedPublish(error, message)

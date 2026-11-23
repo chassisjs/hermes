@@ -6,7 +6,13 @@ import { type PollingOutboxLag, type PollingOutboxPoll } from './types.js'
  */
 type MetricAttributes = Record<string, string | number | boolean>
 
-type MetricOptions = { description?: string; unit?: string }
+type MetricOptions = { description?: string; unit?: string; advice?: { explicitBucketBoundaries?: number[] } }
+
+/**
+ * The bucket boundaries of the duration histograms, in seconds. The default boundaries of the SDK of OpenTelemetry
+ * suit milliseconds, so almost every claim would fall into one bucket.
+ */
+const DurationBuckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60]
 
 /**
  * An observable instrument of a {@link MeterLike}.
@@ -103,10 +109,12 @@ const createPollingOutboxMetrics = (params: PollingOutboxMetricsParams): Polling
   const claimDuration = meter.createHistogram('hermes.outbox.claim.duration', {
     description: 'How long a claim of the outbox took, reading the claimed messages included.',
     unit: 's',
+    advice: { explicitBucketBoundaries: DurationBuckets },
   })
   const publishDuration = meter.createHistogram('hermes.outbox.publish.duration', {
     description: 'How long publishing the claimed messages of a poll took.',
     unit: 's',
+    advice: { explicitBucketBoundaries: DurationBuckets },
   })
   const polls = meter.createCounter('hermes.outbox.polls', { description: 'The polls of the outbox.', unit: '{poll}' })
   const published = meter.createCounter('hermes.outbox.messages.published', {

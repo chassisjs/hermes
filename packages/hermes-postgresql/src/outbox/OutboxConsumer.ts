@@ -4,6 +4,7 @@ import postgres, { Options, PostgresType } from 'postgres'
 import { getSlotName, PublicationName } from '../common/consts.js'
 import { ConsumerCreationParams } from '../common/ConsumerCreationParams.js'
 import { HermesConsumerAlreadyTakenError } from '../common/errors.js'
+import { type Lsn } from '../common/lsn.js'
 import {
   HermesMessageEnvelope,
   HermesSql,
@@ -104,7 +105,7 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
     | null = null
   private _asyncOutbox: IAsyncOutboxConsumer<Message> | null = null
   private _slotName: string | null = null
-  private readonly _unpublished = new Set<Transaction<InsertResult>>()
+  private readonly _unpublished = new Map<Lsn, Date>()
 
   /**
    * @internal
@@ -426,13 +427,15 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
             payload: 'jsonb',
           },
           onInsert: async (transaction, acknowledge) => {
-            this._unpublished.add(transaction)
+            if (!this._unpublished.has(transaction.lsn)) {
+              this._unpublished.set(transaction.lsn, transaction.timestamp)
+            }
 
             const message = {
               transaction,
               acknowledge: async () => {
                 assert(this._state)
-                this._unpublished.delete(transaction)
+                this._unpublished.delete(transaction.lsn)
                 acknowledge()
                 await this._state.moveFurther(transaction.lsn)
               },
@@ -514,14 +517,14 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
       `,
       this._asyncOutbox ? this._asyncOutbox.getLag(options) : null,
     ])
-    const oldestCommit = Math.min(...[...this._unpublished].map(({ timestamp }) => timestamp.getTime()))
+    const oldestCommit = this._unpublished.values().next().value
 
     return {
       replication: {
         walBytes: slot?.walBytes == null ? null : Number(slot.walBytes),
         isSlotActive: slot?.isActive ?? false,
-        oldestPendingAge: this._unpublished.size
-          ? Duration.ofMiliseconds(Math.max(Date.now() - oldestCommit, 0))
+        oldestPendingAge: oldestCommit
+          ? Duration.ofMiliseconds(Math.max(Date.now() - oldestCommit.getTime(), 0))
           : null,
         pendingTransactions: this._unpublished.size,
         redeliveryCount: state.redeliveryCount,

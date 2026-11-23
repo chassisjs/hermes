@@ -117,6 +117,10 @@ describe('createPollingOutboxMetrics', () => {
     const claimDuration = collected.get('hermes.outbox.claim.duration')!
 
     expect(claimDuration.dataPointType).toBe(DataPointType.HISTOGRAM)
-    expect(claimDuration.dataPoints[0].value).toMatchObject({ count: 1, sum: 1.5 })
+    expect(claimDuration.dataPoints[0].value).toMatchObject({
+      count: 1,
+      sum: 1.5,
+      buckets: { boundaries: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60] },
+    })
   })
 })
