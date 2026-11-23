@@ -98,6 +98,10 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
    * that a claim was lost, or when the claim was not renewed for two thirds of the lease, so it does not go on when
    * another instance may have taken it over. A renewal that does not end within a lease is given up, so a hanging
    * query does not stop the next renewals or the end of the batch.
+   *
+   * `claimedAt` is taken before the claim, so a slow claim (e.g. reading big partitions) can use up two thirds of the
+   * lease before publishing starts. Then the claims are renewed once first, and the lanes are published only when the
+   * renewal confirms them; otherwise every batch would end without publishing anything.
    */
   const publishLanes = async (lanes: PollingLane<Message>[], stopping: AbortSignal, claimedAt: number) => {
     let renewedAt = claimedAt
@@ -126,16 +130,17 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
         timeout.abort()
       }
     }
-    const renewal = setInterval(
-      () => {
-        renewing ??= renew().finally(() => {
-          renewing = undefined
-        })
-      },
-      Math.max(Math.floor(lease.ms / 3), 1),
-    )
+    const renewOnce = () =>
+      (renewing ??= renew().finally(() => {
+        renewing = undefined
+      }))
+    const renewal = setInterval(renewOnce, Math.max(Math.floor(lease.ms / 3), 1))
 
     try {
+      if (lanes.length && !hasClaim()) {
+        await renewOnce()
+      }
+
       await Promise.all(lanes.map((lane) => publishLane(lane, stopping, hasClaim)))
     } finally {
       clearInterval(renewal)
