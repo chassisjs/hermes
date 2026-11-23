@@ -1,12 +1,12 @@
 # Change Log
 
-# Unreleased
+# [1.0.0-alpha.29](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.23...v1.0.0-alpha.29) (2026-11-23)
 
 ### Features
 
 - `getLag()` of the outbox consumer returns `{ replication, asyncOutbox }`: the WAL that the replication slot did not confirm yet (read from the database), whether the slot is in use, the transactions that the instance received and did not publish yet, and the lag of the async outbox (as in hermes-mysql). `getLag()` and `onPoll` of the async outbox too.
 - `createOutboxMetrics` records them with OpenTelemetry.
-- Needs the next `@chassisjs/hermes` (`onPoll`, `PollingOutboxLag`, `createPollingOutboxMetrics`).
+- Needs `@chassisjs/hermes` `~1.0.0-alpha.29` (`onPoll`, `PollingOutboxLag`, `createPollingOutboxMetrics`).
 
 ### Bug Fixes
 

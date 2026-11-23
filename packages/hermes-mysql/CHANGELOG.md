@@ -3,12 +3,12 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
-# Unreleased
+# [1.0.0-alpha.29](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.28...v1.0.0-alpha.29) (2026-11-23)
 
 ### Features
 
 - `getLag()` of the outbox consumer reads how far it is behind, also without `start()`: the age of its oldest undelivered message, the undelivered and failing messages (counted up to `countLimit`, 10 000 by default) and the partitions with undelivered messages. `onPoll` reports every poll. `createOutboxMetrics` records both with OpenTelemetry.
-- Needs the next `@chassisjs/hermes` (`onPoll`, `PollingOutboxLag`).
+- Needs `@chassisjs/hermes` `~1.0.0-alpha.29` (`onPoll`, `PollingOutboxLag`).
 
 # [1.0.0-alpha.28](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.27...v1.0.0-alpha.28) (2026-11-23)
 
