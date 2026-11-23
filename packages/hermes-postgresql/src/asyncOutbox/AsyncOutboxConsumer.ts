@@ -1,10 +1,13 @@
 import {
+  assert,
   createPollingOutbox,
   Duration,
   useExponentialRetryPolicy,
   useNoOrderingPolicy,
   usePartitionOrderingPolicy,
   type PolledMessage,
+  type PollingOutboxLag,
+  type PollingOutboxPoll,
   type RetryPolicy,
 } from '@chassisjs/hermes'
 import { AsyncOrSync } from 'ts-essentials'
@@ -146,7 +149,15 @@ type ConsumerCreationParams<Message> = {
    * @defaultValue No-op function
    */
   onDbError?: ErrorCallback
+
+  /**
+   * Called after every poll that did not fail, also when there was nothing to publish, e.g. for the counters and
+   * histograms of a metrics library. An error it throws is ignored.
+   */
+  onPoll?: (poll: PollingOutboxPoll) => void
 }
+
+const DefaultLagCountLimit = 10_000
 
 /**
  * Interface for the asynchronous outbox consumer.
@@ -173,6 +184,15 @@ interface IAsyncOutboxConsumer<Message extends JSONValue> {
    * Stops the async outbox consumer.
    */
   stop(): Promise<void>
+
+  /**
+   * Reads how far the consumer is behind: the age of its oldest undelivered message (by the clock of PostgreSQL), the
+   * number of undelivered messages (counted up to `countLimit`), how many of them failed, and the number of partitions
+   * with undelivered messages. It is the same for every instance of the consumer, so aggregate it with `max`.
+   *
+   * @param options.countLimit - Count at most this many undelivered messages (default: `10000`)
+   */
+  getLag(options?: { countLimit?: number }): Promise<PollingOutboxLag>
 }
 
 /**
@@ -346,6 +366,7 @@ class AsyncOutboxConsumer<Message extends JSONValue> implements IAsyncOutboxCons
       retry: this._params.retry ?? useExponentialRetryPolicy({ initial: this._params.waitAfterFailedPublish }),
       onFailedPublish: this._params.onFailedPublish,
       onDbError: this._params.onDbError,
+      onPoll: this._params.onPoll,
     }).start()
 
     this._stop = stop
@@ -376,6 +397,18 @@ class AsyncOutboxConsumer<Message extends JSONValue> implements IAsyncOutboxCons
 
     this._stop = null
     await stop?.()
+  }
+
+  /**
+   * Reads how far the consumer is behind. See {@link IAsyncOutboxConsumer.getLag}.
+   */
+  async getLag(options?: { countLimit?: number }): Promise<PollingOutboxLag> {
+    const countLimit = options?.countLimit ?? DefaultLagCountLimit
+    const { consumerName, partitionKey } = this._params
+
+    assert(Number.isInteger(countLimit) && countLimit >= 1, '`countLimit` has to be a positive integer.')
+
+    return createPollingStore<Message>(this._getSql, { consumerName, partitionKey }).getLag({ countLimit })
   }
 }
 

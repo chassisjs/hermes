@@ -1,4 +1,13 @@
 export { createPollingOutbox } from './createPollingOutbox.js'
+export {
+  createPollingOutboxMetrics,
+  type BatchObserverLike,
+  type MeterLike,
+  type MetricAttributes,
+  type ObservableLike,
+  type PollingOutboxMetrics,
+  type PollingOutboxMetricsParams,
+} from './openTelemetry.js'
 export { useExponentialRetryPolicy, useNoOrderingPolicy, usePartitionOrderingPolicy } from './policies.js'
 export type {
   MessageClaimingStore,
@@ -7,7 +16,10 @@ export type {
   PollingLane,
   PollingOutbox,
   PollingOutboxBaseStore,
+  PollingOutboxLag,
+  PollingOutboxLagStore,
   PollingOutboxParams,
+  PollingOutboxPoll,
   PollingPolicy,
   PollingPublish,
   RetryPolicy,

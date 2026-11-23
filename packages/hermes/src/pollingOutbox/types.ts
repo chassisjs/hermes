@@ -155,6 +155,57 @@ type PollingPublish<Message> = (message: PolledMessage<Message>) => Promise<void
  */
 type RetryPolicy = (attempts: number) => Duration
 
+/**
+ * How far a consumer of a polling outbox is behind, read from the database, e.g. for the gauges of a metrics library.
+ * It is the same for every instance of the consumer, so aggregate it with `max`, not `sum`.
+ */
+type PollingOutboxLag = {
+  /** The age of the oldest undelivered message, by the clock of the database. `null` when there is none. */
+  oldestPendingAge: Duration | null
+  /** The number of undelivered messages, counted up to a limit (see {@link isPendingExact}). */
+  pending: number
+  /** `false` when there are more undelivered messages than were counted. */
+  isPendingExact: boolean
+  /** The number of counted undelivered messages that failed at least once. */
+  failing: number
+  /** The number of partitions with undelivered messages. */
+  partitions: number
+}
+
+/**
+ * A store that reads the lag of its consumer. Implemented by the stores of the databases.
+ */
+type PollingOutboxLagStore = {
+  /**
+   * Reads how far the consumer is behind.
+   *
+   * @param params.countLimit - Count at most this many undelivered messages, so that a big backlog does not make the
+   * query expensive
+   */
+  getLag(params: { countLimit: number }): Promise<PollingOutboxLag>
+}
+
+/**
+ * What one poll of a polling outbox did. Given to {@link PollingOutboxParams.onPoll}, e.g. for the counters and
+ * histograms of a metrics library.
+ */
+type PollingOutboxPoll = {
+  /** How long the claim took, reading the claimed messages included. */
+  claimDuration: Duration
+  /** How long publishing the claimed messages took. */
+  publishDuration: Duration
+  /** The number of claimed lanes (e.g. partitions). */
+  lanes: number
+  /** The number of claimed messages. */
+  messages: number
+  /** The number of published messages. */
+  published: number
+  /** The number of messages that could not be published. */
+  failed: number
+  /** `true` when a renewal said that another instance took over a claim, so its lane stopped. */
+  isClaimLost: boolean
+}
+
 type PollingOutboxParams<Message> = {
   /**
    * The policy that claims messages, e.g. `usePartitionOrderingPolicy(store)`.
@@ -212,6 +263,11 @@ type PollingOutboxParams<Message> = {
    * `pollInterval`.
    */
   onDbError?: (error: unknown) => void
+
+  /**
+   * Called after every poll that did not fail, also when there was nothing to publish. An error it throws is ignored.
+   */
+  onPoll?: (poll: PollingOutboxPoll) => void
 }
 
 type PollingOutbox = {
@@ -231,7 +287,10 @@ export type {
   PollingLane,
   PollingOutbox,
   PollingOutboxBaseStore,
+  PollingOutboxLag,
+  PollingOutboxLagStore,
   PollingOutboxParams,
+  PollingOutboxPoll,
   PollingPolicy,
   PollingPublish,
   RetryPolicy,

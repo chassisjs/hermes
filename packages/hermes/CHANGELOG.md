@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# Unreleased
+
+### Features
+
+- `onPoll` of `createPollingOutbox`: called after every poll with what it did (`claimDuration`, `publishDuration`, `lanes`, `messages`, `published`, `failed`, `isClaimLost`), e.g. for metrics.
+- `PollingOutboxLag` and `PollingOutboxLagStore`: how far a consumer of a polling outbox is behind (the age of the oldest undelivered message, the counted undelivered and failing messages, the partitions with undelivered messages).
+- `createPollingOutboxMetrics` records the lag and the polls with OpenTelemetry. It takes the `Meter` of the application, so Hermes does not depend on `@opentelemetry/api`.
+
 # [1.0.0-alpha.28](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.27...v1.0.0-alpha.28) (2026-11-23)
 
 ### Bug Fixes

@@ -161,7 +161,7 @@ const useBasicAsyncOutboxConsumerPolicy =
  */
 type AsyncOutboxPolicyOptions = Pick<
   AsyncOutboxConsumerCreationParams<JSONValue>,
-  'ordering' | 'batchSize' | 'lease' | 'retry' | 'waitAfterFailedPublish' | 'onFailedPublish' | 'onDbError'
+  'ordering' | 'batchSize' | 'lease' | 'retry' | 'waitAfterFailedPublish' | 'onFailedPublish' | 'onDbError' | 'onPoll'
 >
 
 /**

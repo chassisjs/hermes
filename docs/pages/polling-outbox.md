@@ -46,6 +46,69 @@ A failed message waits before the next attempt. By default (`useExponentialRetry
 
 Delivery is **at-least-once**. An instance can die after publishing a message and before marking it as delivered, and then the message is published again. Make the handlers idempotent, e.g. with the `messageId`.
 
+## Lag and metrics
+
+`getLag()` of a consumer reads from the database how far it is behind:
+
+```typescript
+const lag = await outbox.getLag()
+// {
+//   oldestPendingAge: Duration | null, // the age of the oldest undelivered message, by the clock of the database
+//   pending: 1200,                     // undelivered messages, counted up to `countLimit` (default 10 000)
+//   isPendingExact: true,              // false when there are more than `countLimit`
+//   failing: 3,                        // counted undelivered messages that failed at least once
+//   partitions: 40,                    // partitions with undelivered messages
+// }
+```
+
+Alert on `oldestPendingAge`: it does not depend on the traffic and grows also when a message keeps failing and stops its partition, or when the outbox publishes nothing without an error. The lag is the same for every instance of the consumer, so aggregate it with `max`, not `sum`. Reading it costs about as much as a poll.
+
+`onPoll` of a consumer is called after every poll that did not fail, with what this instance did: `claimDuration`, `publishDuration`, `lanes`, `messages`, `published`, `failed` and `isClaimLost`. A `claimDuration` close to the `lease` means that the claims are too slow for the lease.
+
+`createPollingOutboxMetrics` of `@chassisjs/hermes` records both with OpenTelemetry. Hermes does not depend on `@opentelemetry/api`: pass the `Meter` of your application.
+
+```typescript
+import { metrics } from '@opentelemetry/api'
+import { createPollingOutboxMetrics } from '@chassisjs/hermes'
+import { createOutboxConsumer } from '@chassisjs/hermes-mysql'
+
+const outboxMetrics = createPollingOutboxMetrics({
+  meter: metrics.getMeter('orders'),
+  attributes: { 'hermes.consumer.name': 'orders' },
+  getLag: () => outbox.getLag(),
+})
+const outbox = createOutboxConsumer({ /* ... */ consumerName: 'orders', onPoll: outboxMetrics.onPoll })
+```
+
+| Metric                                      | Type      | Unit          | Source     |
+| ------------------------------------------- | --------- | ------------- | ---------- |
+| `hermes.outbox.oldest_pending_message.age`  | gauge     | `s`           | `getLag()` |
+| `hermes.outbox.pending_messages`            | gauge     | `{message}`   | `getLag()` |
+| `hermes.outbox.failing_messages`            | gauge     | `{message}`   | `getLag()` |
+| `hermes.outbox.pending_partitions`          | gauge     | `{partition}` | `getLag()` |
+| `hermes.outbox.claim.duration`              | histogram | `s`           | `onPoll`   |
+| `hermes.outbox.publish.duration`            | histogram | `s`           | `onPoll`   |
+| `hermes.outbox.polls`                       | counter   | `{poll}`      | `onPoll`   |
+| `hermes.outbox.messages.published`/`failed` | counter   | `{message}`   | `onPoll`   |
+| `hermes.outbox.claims.lost`                 | counter   | `{claim}`     | `onPoll`   |
+
+In Hermes PostgreSQL, `getLag()` of the consumer returns `{ replication, asyncOutbox }`, and `createOutboxMetrics` records also the logical replication: the WAL that the replication slot did not confirm yet (`hermes.outbox.replication.wal`, read from the database, so it grows also when no instance runs), whether the slot is in use, and the transactions that this instance received and did not publish yet. The main outbox does not keep the state of every message, so it has no count of undelivered messages.
+
+```typescript
+import { createOutboxMetrics } from '@chassisjs/hermes-postgresql'
+
+let outboxMetrics: PollingOutboxMetrics | undefined
+const outbox = createOutboxConsumer({
+  /* ... */
+  asyncOutbox: useBasicAsyncOutboxConsumerPolicy(Duration.ofSeconds(5), {
+    onPoll: (poll) => outboxMetrics?.onPoll(poll),
+  }),
+})
+
+await outbox.start()
+outboxMetrics = createOutboxMetrics({ meter: metrics.getMeter('orders'), outbox })
+```
+
 ## The async outbox of Hermes PostgreSQL
 
 ```typescript

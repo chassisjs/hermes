@@ -1,4 +1,4 @@
-import { type Duration, type RetryPolicy } from '@chassisjs/hermes'
+import { type Duration, type PollingOutboxLag, type PollingOutboxPoll, type RetryPolicy } from '@chassisjs/hermes'
 import { type Pool, type PoolOptions } from 'mysql2/promise'
 
 /**
@@ -174,6 +174,12 @@ type ConsumerCreationParams<Message extends JSONValue> = {
    * Called when a query fails, e.g. when the database is not available.
    */
   onDbError?: (error: unknown) => void
+
+  /**
+   * Called after every poll that did not fail, also when there was nothing to publish, e.g. for the counters and
+   * histograms of a metrics library. An error it throws is ignored.
+   */
+  onPoll?: (poll: PollingOutboxPoll) => void
 }
 
 type OutboxConsumer<Message extends JSONValue> = {
@@ -198,6 +204,18 @@ type OutboxConsumer<Message extends JSONValue> = {
    * another pool.
    */
   getDbConnection(): Pool
+
+  /**
+   * Reads how far the consumer is behind: the age of its oldest undelivered message (by the clock of MySQL), the number
+   * of undelivered messages (counted up to `countLimit`), how many of them failed, and the number of partitions with
+   * undelivered messages. It reads the messages of `partitionKey` only when the consumer has one.
+   *
+   * It is the same for every instance of the consumer, so aggregate it with `max`. It does not need `start()` and
+   * uses the pool of {@link getDbConnection}. The age is of the undelivered message with the lowest position.
+   *
+   * @param options.countLimit - Count at most this many undelivered messages (default: `10000`)
+   */
+  getLag(options?: { countLimit?: number }): Promise<PollingOutboxLag>
 }
 
 export type {

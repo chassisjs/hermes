@@ -1,4 +1,4 @@
-import { Duration } from '@chassisjs/hermes'
+import { Duration, type PollingOutboxPoll } from '@chassisjs/hermes'
 import { afterAll, afterEach, beforeAll, describe, expect, jest, test } from '@jest/globals'
 import { CompiledQuery, Kysely, MysqlDialect } from 'kysely'
 import { createPool as createCallbackPool } from 'mysql2'
@@ -786,6 +786,68 @@ describe('Review fixes', () => {
         await connection.rollback()
         connection.release()
       }
+    })
+  })
+})
+
+describe('Lag', () => {
+  test('getLag reads the oldest undelivered message, the counts and the partitions, without start()', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      const outbox = createConsumer(options, () => {})
+
+      await migrate(pool)
+
+      expect(await outbox.getLag()).toEqual({
+        oldestPendingAge: null,
+        pending: 0,
+        isPendingExact: true,
+        failing: 0,
+        partitions: 0,
+      })
+
+      await outbox.queue([envelope('a1'), envelope('a2')], { partitionKey: 'a' })
+      await outbox.queue(envelope('b1'), { partitionKey: 'b' })
+      await outbox.queue(envelope('delivered'), { partitionKey: 'c' })
+      await createConsumer(options, () => {}, { consumerName: 'other' }).queue(envelope('other'))
+      await pool.query("UPDATE `hermes_outbox` SET `delivered_at` = NOW(6) WHERE `message_id` = 'delivered'")
+      await pool.query("UPDATE `hermes_outbox` SET `attempts` = 2 WHERE `message_id` = 'a2'")
+      await pool.query(
+        "UPDATE `hermes_outbox` SET `added_at` = NOW(6) - INTERVAL 90 SECOND WHERE `message_id` IN ('a1', 'other')",
+      )
+
+      const lag = await outbox.getLag()
+
+      expect(lag).toEqual({
+        oldestPendingAge: expect.any(Duration),
+        pending: 3,
+        isPendingExact: true,
+        failing: 1,
+        partitions: 2,
+      })
+      expect(lag.oldestPendingAge!.ms).toBeGreaterThanOrEqual(90_000)
+      expect(lag.oldestPendingAge!.ms).toBeLessThan(120_000)
+      expect(await outbox.getLag({ countLimit: 2 })).toMatchObject({ pending: 2, isPendingExact: false })
+      expect(await createConsumer(options, () => {}, { partitionKey: 'b' }).getLag()).toMatchObject({
+        pending: 1,
+        partitions: 1,
+        failing: 0,
+      })
+      await expect(outbox.getLag({ countLimit: 0 })).rejects.toThrow('countLimit')
+    })
+  })
+
+  test('onPoll reports what the polls published', async () => {
+    await mysql.withDatabase(async ({ options }) => {
+      const polls: PollingOutboxPoll[] = []
+      const outbox = createConsumer(options, () => {}, { onPoll: (poll) => polls.push(poll) })
+      const stop = await outbox.start()
+
+      await outbox.queue([envelope('m1'), envelope('m2')])
+      await waitUntil(() => polls.reduce((sum, { published }) => sum + published, 0) === 2)
+      await stop()
+
+      expect(polls.every(({ failed, isClaimLost }) => failed === 0 && !isClaimLost)).toBe(true)
+      expect(await outbox.getLag()).toMatchObject({ oldestPendingAge: null, pending: 0 })
     })
   })
 })

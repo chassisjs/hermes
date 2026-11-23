@@ -6,6 +6,8 @@ import { noop, swallow } from '../utils/utils.js'
 import { useExponentialRetryPolicy } from './policies.js'
 import { type PollingLane, type PollingOutbox, type PollingOutboxParams } from './types.js'
 
+type PublishingStats = { published: number; failed: number; isClaimLost: boolean }
+
 /**
  * Wraps a handler of the application, so an error it throws or a promise it rejects does not stop polling or crash
  * the process.
@@ -55,13 +57,19 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
   const owner = params.owner ?? randomUUID()
   const onFailedPublish = ignoringErrors(params.onFailedPublish)
   const onDbError = ignoringErrors(params.onDbError)
+  const onPoll = ignoringErrors(params.onPoll)
   let isStarted = false
   let renewing: Promise<void> | undefined
 
   assert(Number.isInteger(batchSize) && batchSize >= 1, '`batchSize` has to be a positive integer.')
   assert(lease.ms > 0, '`lease` has to be longer than 0.')
 
-  const publishLane = async (lane: PollingLane<Message>, stopping: AbortSignal, hasClaim: () => boolean) => {
+  const publishLane = async (
+    lane: PollingLane<Message>,
+    stopping: AbortSignal,
+    hasClaim: () => boolean,
+    stats: PublishingStats,
+  ) => {
     for (const message of lane.messages) {
       if (stopping.aborted || !hasClaim()) {
         return
@@ -77,8 +85,10 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
 
       try {
         if (error === undefined) {
+          stats.published++
           await policy.markDelivered(message)
         } else {
+          stats.failed++
           onFailedPublish(error, message)
           await policy.markFailed(message, { retryAfter: retry(message.attempts + 1), owner })
         }
@@ -103,10 +113,14 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
    * lease before publishing starts. Then the claims are renewed once first, and the lanes are published only when the
    * renewal confirms them; otherwise every batch would end without publishing anything.
    */
-  const publishLanes = async (lanes: PollingLane<Message>[], stopping: AbortSignal, claimedAt: number) => {
+  const publishLanes = async (
+    lanes: PollingLane<Message>[],
+    stopping: AbortSignal,
+    claimedAt: number,
+  ): Promise<PublishingStats> => {
     let renewedAt = claimedAt
-    let isClaimLost = false
-    const hasClaim = () => !isClaimLost && Date.now() - renewedAt < lease.ms - Math.floor(lease.ms / 3)
+    const stats: PublishingStats = { published: 0, failed: 0, isClaimLost: false }
+    const hasClaim = () => !stats.isClaimLost && Date.now() - renewedAt < lease.ms - Math.floor(lease.ms / 3)
     const renew = async () => {
       const startedAt = Date.now()
       const timeout = new AbortController()
@@ -122,7 +136,7 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
         if (isClaimed) {
           renewedAt = Math.max(renewedAt, startedAt)
         } else {
-          isClaimLost = true
+          stats.isClaimLost = true
         }
       } catch (error) {
         onDbError(error)
@@ -141,11 +155,13 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
         await renewOnce()
       }
 
-      await Promise.all(lanes.map((lane) => publishLane(lane, stopping, hasClaim)))
+      await Promise.all(lanes.map((lane) => publishLane(lane, stopping, hasClaim, stats)))
     } finally {
       clearInterval(renewal)
       await renewing
     }
+
+    return stats
   }
 
   return {
@@ -162,8 +178,16 @@ const createPollingOutbox = <Message>(params: PollingOutboxParams<Message>): Pol
           try {
             const claimedAt = Date.now()
             const lanes = await policy.claim({ owner, lease, limit: batchSize })
+            const publishedAt = Date.now()
+            const stats = await publishLanes(lanes, stopping.signal, claimedAt)
 
-            await publishLanes(lanes, stopping.signal, claimedAt)
+            onPoll({
+              claimDuration: Duration.ofMiliseconds(publishedAt - claimedAt),
+              publishDuration: Duration.ofMiliseconds(Date.now() - publishedAt),
+              lanes: lanes.length,
+              messages: lanes.reduce((sum, { messages }) => sum + messages.length, 0),
+              ...stats,
+            })
 
             hasMore = lanes.some(({ messages }) => messages.length >= batchSize)
           } catch (error) {
