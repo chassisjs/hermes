@@ -13,6 +13,7 @@ import {
   migrate,
   type OutboxConsumer,
 } from '../src/index.js'
+import { pendingPartitionsQuery } from '../src/createPollingStore.js'
 import { createMySql } from './mysql.js'
 
 jest.setTimeout(Duration.ofMinutes(5).ms)
@@ -609,6 +610,27 @@ describe('Review fixes', () => {
       ).toEqual([])
 
       await outbox.getDbConnection().end()
+    })
+  })
+
+  test('finds the partitions with undelivered messages with one index lookup per partition, not per message', async () => {
+    await mysql.withDatabase(async ({ pool }) => {
+      await migrate(pool)
+      await pool.query(
+        `INSERT INTO \`hermes_outbox\` (\`consumer_name\`, \`partition_key\`, \`message_id\`, \`message_type\`, \`data\`)
+         WITH RECURSIVE n (i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 199)
+         SELECT 'app', CONCAT('p', LPAD(p.i, 3, '0')), CONCAT('m', p.i, '-', m.i), 'Test', '{}' FROM n p CROSS JOIN n m`,
+      )
+      await pool.query('ANALYZE TABLE `hermes_outbox`')
+
+      const { text, params } = pendingPartitionsQuery({ consumerName: 'app' })
+      const [plan] = await pool.query<RowDataPacket[]>(`EXPLAIN FORMAT=TREE ${text}`, params)
+      const [rows] = await pool.query<RowDataPacket[]>(text, params)
+
+      expect(String(Object.values(plan[0])[0])).toMatch(
+        /index skip scan for (deduplication|grouping) on m using idx_hermes_outbox_pending_partitions/i,
+      )
+      expect(rows).toHaveLength(200)
     })
   })
 

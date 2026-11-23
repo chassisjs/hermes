@@ -28,6 +28,23 @@ const Columns = '`position`, `partition_key`, `message_id`, `message_type`, `att
 const microseconds = (duration: Duration) => Math.round(duration.ms * 1000)
 
 /**
+ * Finds the partitions with undelivered messages with a loose index scan of `idx_hermes_outbox_pending_partitions`
+ * (`Using index for group-by`): one index lookup per partition, however many undelivered messages they have. The
+ * `GROUP BY` names all the columns of the index, because MySQL uses the loose index scan only for a leftmost prefix of
+ * it. A recursive CTE with a correlated `MIN(partition_key) ... > previous` does not work here: MySQL does not use a
+ * range on `partition_key` in it and scans all the undelivered messages for every partition.
+ *
+ * @param scope - The consumer and, optionally, the partition
+ */
+const pendingPartitionsQuery = ({ consumerName, partitionKey }: PollingStoreScope) => ({
+  text: `SELECT m.\`partition_key\` FROM \`${OutboxTable}\` m
+    WHERE m.\`consumer_name\` = ?${partitionKey === undefined ? '' : ' AND m.`partition_key` = ?'}
+      AND m.\`delivered_at\` IS NULL
+    GROUP BY m.\`consumer_name\`, m.\`delivered_at\`, m.\`partition_key\``,
+  params: partitionKey === undefined ? [consumerName] : [consumerName, partitionKey],
+})
+
+/**
  * Creates the store of the `hermes_outbox` table for `createPollingOutbox` from `@chassisjs/hermes`. It works with
  * `usePartitionOrderingPolicy` and `useNoOrderingPolicy`.
  *
@@ -37,16 +54,16 @@ const microseconds = (duration: Duration) => Math.round(duration.ms * 1000)
  * rows of `hermes_outbox` by their primary key, which locks only those rows in `REPEATABLE READ` too. Still, use a
  * pool of {@link createPollingPool}, whose connections run in `READ COMMITTED`.
  *
- * `claimPartitions` first finds the partitions with undelivered messages with a skip scan of an index (one index
- * lookup per partition), so the cost of a poll does not grow with the number of undelivered messages, but it grows
- * with the number of partitions that have them. It adds the new ones to `hermes_outbox_partition` and removes the free
- * partitions without undelivered messages. It reads the messages with plain `SELECT`s: in MySQL, a subquery of
- * `INSERT ... SELECT` or `DELETE` locks the rows it reads, so it would wait for the open transactions of the
- * application. It does it before the claim, in other statements, so it does not hold the locks of the partitions while
- * it claims them. The next poll adds a removed partition again when it gets new messages, so a message that commits
- * during the removal is not lost. The statements change rows found by their primary key (found first with a plain
- * `SELECT` when needed): an `UPDATE` that scans a secondary index waits for the rows that the application inserted and
- * did not commit yet, even in `READ COMMITTED`.
+ * `claimPartitions` first finds the partitions with undelivered messages with a loose index scan (one index lookup
+ * per partition, see {@link pendingPartitionsQuery}), so the cost of a poll does not grow with the number of
+ * undelivered messages, but it grows with the number of partitions that have them. It adds the new ones to
+ * `hermes_outbox_partition` and removes the free partitions without undelivered messages. It reads the messages with
+ * plain `SELECT`s: in MySQL, a subquery of `INSERT ... SELECT` or `DELETE` locks the rows it reads, so it would wait
+ * for the open transactions of the application. It does it before the claim, in other statements, so it does not hold
+ * the locks of the partitions while it claims them. The next poll adds a removed partition again when it gets new
+ * messages, so a message that commits during the removal is not lost. The statements change rows found by their
+ * primary key (found first with a plain `SELECT` when needed): an `UPDATE` that scans a secondary index waits for the
+ * rows that the application inserted and did not commit yet, even in `READ COMMITTED`.
  *
  * `markFailed` changes a message only when `owner` still has the claim of the message, or of its partition when the
  * message itself is not claimed (`usePartitionOrderingPolicy`).
@@ -182,25 +199,9 @@ const createPollingStore = <Message>(
 
     async claimPartitions({ owner, lease, limit }) {
       const pool = getPool()
-      const { where, params } = inScope('m')
       const { where: partitionWhere, params: partitionParams } = inScope('p')
-
-      const [pending] = await pool.query<RowDataPacket[]>(
-        `WITH RECURSIVE pending (partition_key) AS (
-           SELECT MIN(m.\`partition_key\`) FROM \`${OutboxTable}\` m
-           WHERE ${where} AND m.\`delivered_at\` IS NULL
-           UNION ALL
-           SELECT (
-             SELECT MIN(m.\`partition_key\`) FROM \`${OutboxTable}\` m
-             WHERE ${where} AND m.\`delivered_at\` IS NULL AND m.\`partition_key\` > pending.partition_key
-           )
-           FROM pending
-           WHERE pending.partition_key IS NOT NULL
-         )
-         SELECT /*+ SET_VAR(cte_max_recursion_depth = 4294967295) */ pending.partition_key FROM pending
-         WHERE pending.partition_key IS NOT NULL`,
-        [...params, ...params],
-      )
+      const pendingPartitions = pendingPartitionsQuery(scope)
+      const [pending] = await pool.query<RowDataPacket[]>(pendingPartitions.text, pendingPartitions.params)
       const [registered] = await pool.query<RowDataPacket[]>(
         `SELECT p.\`partition_key\`, p.\`claimed_until\` IS NULL OR p.\`claimed_until\` < NOW(6) AS is_free
          FROM \`${PartitionTable}\` p
@@ -307,4 +308,4 @@ const createPollingStore = <Message>(
   }
 }
 
-export { createPollingStore, type PollingStoreScope }
+export { createPollingStore, pendingPartitionsQuery, type PollingStoreScope }
