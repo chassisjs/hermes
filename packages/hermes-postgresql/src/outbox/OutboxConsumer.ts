@@ -1,4 +1,4 @@
-import { assert, Duration, swallow } from '@chassisjs/hermes'
+import { assert, Duration, noop, swallow } from '@chassisjs/hermes'
 import { setTimeout } from 'node:timers/promises'
 import postgres, { Options, PostgresType } from 'postgres'
 import { getSlotName, PublicationName } from '../common/consts.js'
@@ -337,7 +337,15 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
         message: JSON.parse(result.payload) as Message,
       }))
 
-      await publish(messages)
+      try {
+        await publish(messages)
+      } catch (error) {
+        Promise.resolve()
+          .then(() => this._params.onFailedPublish?.(error))
+          .catch(noop)
+
+        throw error
+      }
     }
     const onFailedPublish = async (tx: Transaction<InsertResult>) => {
       assert(this._state)

@@ -203,4 +203,39 @@ describe('Lag', () => {
       await stop()
     })
   })
+
+  test('the main outbox calls onFailedPublish of the consumer and publishes the transaction again', async () => {
+    await postgres(async (_sql, container, onDispose) => {
+      const errors: unknown[] = []
+      const published: number[] = []
+      const outbox = createOutboxConsumer<MedicineEvent>({
+        getOptions: () => getOptions(container),
+        publish: async (messages) => {
+          const [{ redeliveryCount }] = Array.isArray(messages) ? messages : [messages]
+
+          if (redeliveryCount === 0) {
+            throw new Error('broker is down')
+          }
+
+          published.push(redeliveryCount)
+        },
+        consumerName: 'app',
+        waitAfterFailedPublish: Duration.ofMiliseconds(100),
+        onFailedPublish: (error) => {
+          errors.push(error)
+          throw new Error('the handler fails too')
+        },
+      })
+      const stop = await outbox.start()
+      onDispose(stop)
+
+      await outbox.queue(envelope('m1'))
+      await waitUntil(() => published.length === 1)
+
+      expect(errors).toEqual([new Error('broker is down')])
+      expect(published).toEqual([1])
+
+      await stop()
+    })
+  })
 })

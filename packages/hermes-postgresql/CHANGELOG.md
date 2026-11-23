@@ -8,6 +8,11 @@
 - `createOutboxMetrics` records them with OpenTelemetry.
 - Needs the next `@chassisjs/hermes` (`onPoll`, `PollingOutboxLag`, `createPollingOutboxMetrics`).
 
+### Bug Fixes
+
+- The main outbox calls `onFailedPublish` of the consumer when `publish` throws. It was declared, but never called. `onDbError` of the consumer is still not called by the main outbox; the async outbox takes its own handlers.
+- `onFailedPublish` and `onDbError` of `ConsumerCreationParams` take `(error: unknown) => void`. They were typed with the `ErrorCallback` of the DOM library (`(error: DOMException) => void`) by mistake.
+
 # [1.0.0-alpha.23](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.22...v1.0.0-alpha.23) (2026-11-03)
 
 ### Chores
