@@ -139,22 +139,22 @@ The tables:
 
 ## Configuration options
 
-| Option            | Default                       | Description                                                                          |
-| ----------------- | ----------------------------- | ------------------------------------------------------------------------------------ |
-| `getOptions`      | (required)                    | The options of the `mysql2` pool                                                     |
-| `publish`         | (required)                    | Publishes a message. Throw to retry it                                               |
-| `consumerName`    | (required)                    | The name of the consumer, at most 250 characters                                     |
-| `partitionKey`    | all partitions                | Publish only this partition                                                          |
-| `ordering`        | `'partition'`                 | `'partition'` or `'none'`                                                            |
-| `pollInterval`    | 1 second                      | The wait between polls when there was nothing more to publish                        |
-| `batchSize`       | 100                           | The maximum number of messages of a partition per poll                               |
-| `maxPartitions`   | 10                            | The maximum number of partitions an instance publishes at once                       |
-| `lease`           | 30 seconds                    | How long a claim lasts                                                               |
-| `retry`           | `useExponentialRetryPolicy()` | The wait before the next attempt of a failed message                                 |
-| `migrate`         | `true`                        | Whether `start()` runs the migrations                                                |
-| `onFailedPublish` |                               | Called when a message cannot be published                                            |
-| `onDbError`       |                               | Called when a query fails. Hermes tries again after `pollInterval`                   |
-| `onPoll`          |                               | Called after every poll, see [Lag and metrics](../polling-outbox.md#lag-and-metrics) |
+| Option            | Default                       | Description                                                        |
+| ----------------- | ----------------------------- | ------------------------------------------------------------------ |
+| `getOptions`      | (required)                    | The options of the `mysql2` pool                                   |
+| `publish`         | (required)                    | Publishes a message. Throw to retry it                             |
+| `consumerName`    | (required)                    | The name of the consumer, at most 250 characters                   |
+| `partitionKey`    | all partitions                | Publish only this partition                                        |
+| `ordering`        | `'partition'`                 | `'partition'` or `'none'`                                          |
+| `pollInterval`    | 1 second                      | The wait between polls when there was nothing more to publish      |
+| `batchSize`       | 100                           | The maximum number of messages of a partition per poll             |
+| `maxPartitions`   | 10                            | The maximum number of partitions an instance publishes at once     |
+| `lease`           | 30 seconds                    | How long a claim lasts                                             |
+| `retry`           | `useExponentialRetryPolicy()` | The wait before the next attempt of a failed message               |
+| `migrate`         | `true`                        | Whether `start()` runs the migrations                              |
+| `onFailedPublish` |                               | Called when a message cannot be published                          |
+| `onDbError`       |                               | Called when a query fails. Hermes tries again after `pollInterval` |
+| `onPoll`          |                               | Called after every poll, see [Observability](../observability.md)  |
 
 ## Limitations
 
