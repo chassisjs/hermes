@@ -22,12 +22,15 @@ type OutboxMetricsParams<Message extends JSONValue> = {
 }
 
 /**
- * How long one read of the lag serves the observable gauges, so that one collection reads it once.
+ * How long one read of the lag serves the observable gauges after it ends, so that one collection reads it once. A
+ * read in progress is shared too.
  */
 const LagReuseMs = 1000
 
 /**
- * Records the metrics of an {@link IOutboxConsumer} with OpenTelemetry. Create it after `start()` of the consumer.
+ * Records the metrics of an {@link IOutboxConsumer} with OpenTelemetry. Create it after `start()` of the consumer, and
+ * call `dispose()` before `stop()`: `getLag()` of a stopped consumer fails, which is reported through `onError` on every
+ * collection.
  *
  * Observable gauges of the main outbox (logical replication):
  * - `hermes.outbox.replication.wal` (`By`): the WAL that the replication slot did not confirm yet
@@ -62,10 +65,20 @@ const createOutboxMetrics = <Message extends JSONValue>(params: OutboxMetricsPar
     Promise.resolve()
       .then(() => params.onError?.(error))
       .catch(noop)
-  let lastRead: { at: number; lag: Promise<OutboxLag> } | null = null
+  let lastRead: { settledAt: number | null; lag: Promise<OutboxLag> } | null = null
   const readLag = () => {
-    if (!lastRead || Date.now() - lastRead.at > LagReuseMs) {
-      lastRead = { at: Date.now(), lag: outbox.getLag({ countLimit }) }
+    if (!lastRead || (lastRead.settledAt !== null && Date.now() - lastRead.settledAt > LagReuseMs)) {
+      const read: { settledAt: number | null; lag: Promise<OutboxLag> } = {
+        settledAt: null,
+        lag: outbox.getLag({ countLimit }),
+      }
+
+      read.lag
+        .finally(() => {
+          read.settledAt = Date.now()
+        })
+        .catch(noop)
+      lastRead = read
     }
 
     return lastRead.lag

@@ -141,8 +141,12 @@ describe('Lag', () => {
       expect(lag.replication.oldestPendingAge!.ms).toBeGreaterThanOrEqual(50)
 
       release()
-      await waitUntil(() => publishing === 1 && polls.length > 0)
-      await setTimeout(300)
+
+      const deadline = Date.now() + Duration.ofSeconds(20).ms
+
+      while ((await outbox.getLag()).replication.pendingTransactions > 0 && Date.now() < deadline) {
+        await setTimeout(50)
+      }
 
       expect((await outbox.getLag()).replication).toMatchObject({ pendingTransactions: 0, oldestPendingAge: null })
 

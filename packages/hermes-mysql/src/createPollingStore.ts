@@ -300,7 +300,7 @@ const createPollingStore = <Message>(
       const pool = getPool()
       const { where, params } = inScope('m')
       const pendingPartitions = pendingPartitionsQuery(scope)
-      const [[oldest], [[counted]], [partitions]] = await Promise.all([
+      const [[oldest], [[counted]], [[partitions]]] = await Promise.all([
         pool.query<RowDataPacket[]>(
           `SELECT TIMESTAMPDIFF(MICROSECOND, m.\`added_at\`, NOW(6)) AS age FROM \`${OutboxTable}\` m
            WHERE ${where} AND m.\`delivered_at\` IS NULL
@@ -317,7 +317,10 @@ const createPollingStore = <Message>(
            ) t`,
           [...params, countLimit + 1],
         ),
-        pool.query<RowDataPacket[]>(pendingPartitions.text, pendingPartitions.params),
+        pool.query<RowDataPacket[]>(
+          `SELECT COUNT(*) AS partitions FROM (${pendingPartitions.text}) p`,
+          pendingPartitions.params,
+        ),
       ])
       const pending = Number(counted.pending)
 
@@ -326,7 +329,7 @@ const createPollingStore = <Message>(
         pending: Math.min(pending, countLimit),
         isPendingExact: pending <= countLimit,
         failing: Math.min(Number(counted.failing), countLimit),
-        partitions: partitions.length,
+        partitions: Number(partitions.partitions),
       }
     },
 
