@@ -11,10 +11,12 @@ import {
   IOutboxConsumer,
   JSONValue,
   MessageEnvelope,
+  OutboxLag,
   OutboxTransaction,
   PublishOptions,
   Stop,
 } from '../common/types.js'
+import { type IAsyncOutboxConsumer } from '../asyncOutbox/AsyncOutboxConsumer.js'
 import { insertRowsAtomically, isTransaction } from '../common/queryExecutor.js'
 import {
   createSerializedPublishingQueue,
@@ -100,6 +102,9 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
   private _sendAsync:
     | ((message: MessageEnvelope<Message> | MessageEnvelope<Message>[], options: PublishOptions) => Promise<void>)
     | null = null
+  private _asyncOutbox: IAsyncOutboxConsumer<Message> | null = null
+  private _slotName: string | null = null
+  private readonly _unpublished = new Set<Transaction<InsertResult>>()
 
   /**
    * @internal
@@ -390,10 +395,12 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
       await migrate(sql, slotName)
 
       await this._state.createOrLoad(partitionKey)
+      this._slotName = slotName
 
       if (this._params.asyncOutbox) {
         const asyncOutbox = this._params.asyncOutbox(this)
         asyncOutboxStop = asyncOutbox.start()
+        this._asyncOutbox = asyncOutbox
 
         this._sendAsync = async (message, options) => {
           await asyncOutbox.send(message, options)
@@ -419,10 +426,13 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
             payload: 'jsonb',
           },
           onInsert: async (transaction, acknowledge) => {
+            this._unpublished.add(transaction)
+
             const message = {
               transaction,
               acknowledge: async () => {
                 assert(this._state)
+                this._unpublished.delete(transaction)
                 acknowledge()
                 await this._state.moveFurther(transaction.lsn)
               },
@@ -454,6 +464,9 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
       this._sql = null
       this._state = undefined
       this._sendAsync = null
+      this._asyncOutbox = null
+      this._slotName = null
+      this._unpublished.clear()
 
       throw error
     }
@@ -471,6 +484,49 @@ export class OutboxConsumer<Message extends JSONValue> implements IOutboxConsume
       ])
 
       this._state = undefined
+      this._asyncOutbox = null
+      this._slotName = null
+      this._unpublished.clear()
+    }
+  }
+
+  /**
+   * Reads how far the consumer is behind: the WAL that its replication slot did not confirm yet (from the database),
+   * the transactions that this instance received and did not publish yet (from its memory), and the lag of the async
+   * outbox, when the consumer has one.
+   *
+   * @param options.countLimit - Count at most this many undelivered messages of the async outbox (default: `10000`)
+   *
+   * @throws {Error} If the consumer is not started
+   */
+  async getLag(options?: { countLimit?: number }): Promise<OutboxLag> {
+    const sql = this.getDbConnection()
+    const slotName = this._slotName
+    const state = this._state
+
+    assert(slotName && state, 'The outbox consumer is not started.')
+
+    const [[slot], asyncOutbox] = await Promise.all([
+      sql<{ walBytes: string | null; isActive: boolean }[]>`
+        SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)::text AS "walBytes", active AS "isActive"
+        FROM pg_replication_slots
+        WHERE slot_name = ${slotName}
+      `,
+      this._asyncOutbox ? this._asyncOutbox.getLag(options) : null,
+    ])
+    const oldestCommit = Math.min(...[...this._unpublished].map(({ timestamp }) => timestamp.getTime()))
+
+    return {
+      replication: {
+        walBytes: slot?.walBytes == null ? null : Number(slot.walBytes),
+        isSlotActive: slot?.isActive ?? false,
+        oldestPendingAge: this._unpublished.size
+          ? Duration.ofMiliseconds(Math.max(Date.now() - oldestCommit, 0))
+          : null,
+        pendingTransactions: this._unpublished.size,
+        redeliveryCount: state.redeliveryCount,
+      },
+      asyncOutbox,
     }
   }
 

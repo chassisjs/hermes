@@ -1,8 +1,9 @@
 import {
-  type Duration,
+  Duration,
   type MessageClaimingStore,
   type PartitionClaimingStore,
   type PolledMessage,
+  type PollingOutboxLagStore,
 } from '@chassisjs/hermes'
 import { HermesSql } from '../common/types.js'
 
@@ -28,6 +29,9 @@ type PollingStoreScope = {
  *
  * The claims use `SELECT ... FOR UPDATE SKIP LOCKED`, and all the times are computed with the clock of PostgreSQL.
  *
+ * `getLag` finds the oldest undelivered message with the same skip scan and the first message of every partition, so
+ * it costs about as much as a poll.
+ *
  * The partitions with undelivered messages are found with a skip scan of the `asyncOutboxPendingIdx` index (one index
  * lookup per partition), so the cost of a poll does not grow with the number of undelivered messages, but it grows
  * with the number of partitions that have them. The partitions without undelivered messages are removed from
@@ -47,7 +51,7 @@ type PollingStoreScope = {
 const createPollingStore = <Message>(
   getSql: () => HermesSql,
   scope: PollingStoreScope,
-): MessageClaimingStore<Message> & PartitionClaimingStore<Message> => {
+): MessageClaimingStore<Message> & PartitionClaimingStore<Message> & PollingOutboxLagStore => {
   const { consumerName, partitionKey } = scope
   const toMessage = (row: AsyncOutboxRow<Message>): PolledMessage<Message> => ({
     id: row.position,
@@ -70,6 +74,25 @@ const createPollingStore = <Message>(
       ? sql`${sql(table)}."consumerName" = ${consumerName}`
       : sql`${sql(table)}."consumerName" = ${consumerName} AND ${sql(table)}."partitionKey" = ${partitionKey}`
   }
+  const pendingPartitions = () => getSql()`
+    WITH RECURSIVE "pending" AS (
+      (
+        SELECT m."partitionKey" FROM "asyncOutbox" m
+        WHERE ${inScope('m')} AND m."delivered" = false
+        ORDER BY m."partitionKey"
+        LIMIT 1
+      )
+      UNION ALL
+      SELECT (
+        SELECT m."partitionKey" FROM "asyncOutbox" m
+        WHERE ${inScope('m')} AND m."delivered" = false AND m."partitionKey" > "pending"."partitionKey"
+        ORDER BY m."partitionKey"
+        LIMIT 1
+      )
+      FROM "pending"
+      WHERE "pending"."partitionKey" IS NOT NULL
+    )
+  `
 
   return {
     async markDelivered(message) {
@@ -149,23 +172,7 @@ const createPollingStore = <Message>(
       const sql = getSql()
 
       await sql`
-        WITH RECURSIVE "pending" AS (
-          (
-            SELECT m."partitionKey" FROM "asyncOutbox" m
-            WHERE ${inScope('m')} AND m."delivered" = false
-            ORDER BY m."partitionKey"
-            LIMIT 1
-          )
-          UNION ALL
-          SELECT (
-            SELECT m."partitionKey" FROM "asyncOutbox" m
-            WHERE ${inScope('m')} AND m."delivered" = false AND m."partitionKey" > "pending"."partitionKey"
-            ORDER BY m."partitionKey"
-            LIMIT 1
-          )
-          FROM "pending"
-          WHERE "pending"."partitionKey" IS NOT NULL
-        )
+        ${pendingPartitions()}
         INSERT INTO "asyncOutboxPartition" ("consumerName", "partitionKey")
         SELECT ${consumerName}, "partitionKey" FROM "pending" WHERE "partitionKey" IS NOT NULL
         ON CONFLICT DO NOTHING
@@ -226,6 +233,42 @@ const createPollingStore = <Message>(
       `
 
       return count
+    },
+
+    async getLag({ countLimit }) {
+      const sql = getSql()
+      const [[partitions], [counted]] = await Promise.all([
+        sql<{ partitions: string; oldestAgeMs: string | null }[]>`
+          ${pendingPartitions()}
+          SELECT count(*) AS "partitions", EXTRACT(EPOCH FROM now() - min("first"."addedAt")) * 1000 AS "oldestAgeMs"
+          FROM "pending"
+          CROSS JOIN LATERAL (
+            SELECT m."addedAt" FROM "asyncOutbox" m
+            WHERE m."consumerName" = ${consumerName} AND m."partitionKey" = "pending"."partitionKey" AND m."delivered" = false
+            ORDER BY m."position"
+            LIMIT 1
+          ) "first"
+          WHERE "pending"."partitionKey" IS NOT NULL
+        `,
+        sql<{ pending: string; failing: string }[]>`
+          SELECT count(*) AS "pending", count(*) FILTER (WHERE t."failsCount" > 0) AS "failing"
+          FROM (
+            SELECT m."failsCount" FROM "asyncOutbox" m
+            WHERE ${inScope('m')} AND m."delivered" = false
+            LIMIT ${countLimit + 1}
+          ) t
+        `,
+      ])
+      const pending = Number(counted.pending)
+
+      return {
+        oldestPendingAge:
+          partitions.oldestAgeMs === null ? null : Duration.ofMiliseconds(Math.max(Number(partitions.oldestAgeMs), 0)),
+        pending: Math.min(pending, countLimit),
+        isPendingExact: pending <= countLimit,
+        failing: Math.min(Number(counted.failing), countLimit),
+        partitions: Number(partitions.partitions),
+      }
     },
 
     async releasePartitions({ owner }) {

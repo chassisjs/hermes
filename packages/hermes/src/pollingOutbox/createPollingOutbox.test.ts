@@ -3,7 +3,12 @@ import { setTimeout } from 'node:timers/promises'
 import { Duration } from '../duration.js'
 import { createPollingOutbox } from './createPollingOutbox.js'
 import { useExponentialRetryPolicy, useNoOrderingPolicy, usePartitionOrderingPolicy } from './policies.js'
-import { type MessageClaimingStore, type PartitionClaimingStore, type PolledMessage } from './types.js'
+import {
+  type MessageClaimingStore,
+  type PartitionClaimingStore,
+  type PolledMessage,
+  type PollingOutboxPoll,
+} from './types.js'
 
 type Row = {
   id: number
@@ -850,6 +855,90 @@ describe('createPollingOutbox', () => {
     expect(() => createPollingOutbox({ policy, publish: () => {}, batchSize: 0 })).toThrow(/batchSize/)
     expect(() => createPollingOutbox({ policy, publish: () => {}, lease: Duration.ofSeconds(0) })).toThrow(/lease/)
     expect(() => usePartitionOrderingPolicy(store, { maxPartitions: 0 })).toThrow(/maxPartitions/)
+  })
+})
+
+describe('onPoll', () => {
+  test('reports what every poll claimed, published and failed, also the empty ones', async () => {
+    const { store, add, rows } = createInMemoryStore()
+    const polls: PollingOutboxPoll[] = []
+
+    add(1, 'a')
+    add(2, 'a')
+    add(3, 'b')
+
+    const stop = createPollingOutbox({
+      ...fast,
+      retry: () => Duration.ofMinutes(1),
+      owner: 'first',
+      policy: usePartitionOrderingPolicy(store),
+      publish: async (message) => {
+        if (message.id === 2) {
+          throw new Error('broker is down')
+        }
+      },
+      onPoll: (poll) => polls.push(poll),
+    }).start()
+
+    await waitUntil(() => polls.length >= 2)
+    await stop()
+
+    expect(polls[0]).toMatchObject({ lanes: 2, messages: 3, published: 2, failed: 1, isClaimLost: false })
+    expect(polls[0].claimDuration.ms).toBeGreaterThanOrEqual(0)
+    expect(polls[0].publishDuration.ms).toBeGreaterThanOrEqual(0)
+    expect(polls[1]).toMatchObject({ lanes: 0, messages: 0, published: 0, failed: 0, isClaimLost: false })
+    expect(rows.filter(({ delivered }) => delivered).map(({ id }) => id)).toEqual([1, 3])
+  })
+
+  test('reports a claim lost to another instance', async () => {
+    const { store, add } = createInMemoryStore()
+    const polls: PollingOutboxPoll[] = []
+
+    add(1)
+
+    const stop = createPollingOutbox({
+      ...fast,
+      lease: Duration.ofMiliseconds(90),
+      owner: 'first',
+      policy: usePartitionOrderingPolicy({
+        ...store,
+        claimPartitions: async (params) => {
+          const keys = await store.claimPartitions(params)
+          await setTimeout(80)
+          return keys
+        },
+        renewPartitions: async () => 0,
+      }),
+      publish: () => Promise.resolve(),
+      onPoll: (poll) => polls.push(poll),
+    }).start()
+
+    await waitUntil(() => polls.length >= 1)
+    await stop()
+
+    expect(polls[0]).toMatchObject({ lanes: 1, messages: 1, published: 0, isClaimLost: true })
+    expect(polls[0].claimDuration.ms).toBeGreaterThanOrEqual(75)
+  })
+
+  test('an error thrown by onPoll does not stop polling', async () => {
+    const { store, add, rows } = createInMemoryStore()
+
+    add(1)
+    add(2)
+
+    const stop = createPollingOutbox({
+      ...fast,
+      batchSize: 1,
+      owner: 'first',
+      policy: usePartitionOrderingPolicy(store),
+      publish: () => Promise.resolve(),
+      onPoll: () => {
+        throw new Error('metrics are down')
+      },
+    }).start()
+
+    await waitUntil(() => rows.every(({ delivered }) => delivered))
+    await stop()
   })
 })
 

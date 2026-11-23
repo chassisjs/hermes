@@ -1,8 +1,9 @@
 import {
-  type Duration,
+  Duration,
   type MessageClaimingStore,
   type PartitionClaimingStore,
   type PolledMessage,
+  type PollingOutboxLagStore,
 } from '@chassisjs/hermes'
 import { type Pool, type ResultSetHeader, type RowDataPacket } from 'mysql2/promise'
 import { inTransaction, OutboxTable, PartitionTable, retryOnLockWaitTimeout } from './sql.js'
@@ -80,7 +81,7 @@ const pendingPartitionsQuery = ({ consumerName, partitionKey }: PollingStoreScop
 const createPollingStore = <Message>(
   getPool: () => Pool,
   scope: PollingStoreScope,
-): MessageClaimingStore<Message> & PartitionClaimingStore<Message> => {
+): MessageClaimingStore<Message> & PartitionClaimingStore<Message> & PollingOutboxLagStore => {
   const { consumerName, partitionKey } = scope
   const inScope = (alias: string) =>
     partitionKey === undefined
@@ -293,6 +294,40 @@ const createPollingStore = <Message>(
       )
 
       return result.affectedRows
+    },
+
+    async getLag({ countLimit }) {
+      const pool = getPool()
+      const { where, params } = inScope('m')
+      const pendingPartitions = pendingPartitionsQuery(scope)
+      const [[oldest], [[counted]], [partitions]] = await Promise.all([
+        pool.query<RowDataPacket[]>(
+          `SELECT TIMESTAMPDIFF(MICROSECOND, m.\`added_at\`, NOW(6)) AS age FROM \`${OutboxTable}\` m
+           WHERE ${where} AND m.\`delivered_at\` IS NULL
+           ORDER BY m.\`position\`
+           LIMIT 1`,
+          params,
+        ),
+        pool.query<RowDataPacket[]>(
+          `SELECT COUNT(*) AS pending, COALESCE(SUM(t.\`attempts\` > 0), 0) AS failing
+           FROM (
+             SELECT m.\`attempts\` FROM \`${OutboxTable}\` m
+             WHERE ${where} AND m.\`delivered_at\` IS NULL
+             LIMIT ?
+           ) t`,
+          [...params, countLimit + 1],
+        ),
+        pool.query<RowDataPacket[]>(pendingPartitions.text, pendingPartitions.params),
+      ])
+      const pending = Number(counted.pending)
+
+      return {
+        oldestPendingAge: oldest.length ? Duration.ofMiliseconds(Math.max(Number(oldest[0].age), 0) / 1000) : null,
+        pending: Math.min(pending, countLimit),
+        isPendingExact: pending <= countLimit,
+        failing: Math.min(Number(counted.failing), countLimit),
+        partitions: partitions.length,
+      }
     },
 
     async releasePartitions({ owner }) {

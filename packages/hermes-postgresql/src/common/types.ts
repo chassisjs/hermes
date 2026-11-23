@@ -1,3 +1,4 @@
+import { type Duration, type PollingOutboxLag } from '@chassisjs/hermes'
 import { Sql, TransactionSql } from 'postgres'
 import { DeepReadonly } from 'ts-essentials'
 import { ConsumerCreationParams } from './ConsumerCreationParams.js'
@@ -239,6 +240,40 @@ type Publish<Message extends JSONValue> = (
 ) => Promise<void>
 
 /**
+ * How far the consumer of the main outbox (logical replication) is behind.
+ */
+type ReplicationLag = {
+  /**
+   * The bytes of WAL between the current end of WAL and the position that the replication slot of the consumer
+   * confirmed (`confirmed_flush_lsn`). It is read from the database, so it grows also when no instance consumes the
+   * slot, and it is the WAL that PostgreSQL has to keep for the slot. It counts all the WAL of the database, not only
+   * the messages of the outbox. `null` when the slot does not exist.
+   */
+  walBytes: number | null
+  /** Whether a process consumes the replication slot now. */
+  isSlotActive: boolean
+  /**
+   * The age of the oldest transaction that this instance received and did not publish yet, by its commit time.
+   * `null` when there is none. It is kept in the memory of this instance.
+   */
+  oldestPendingAge: Duration | null
+  /** The number of transactions that this instance received and did not publish yet. */
+  pendingTransactions: number
+  /** The number of failed attempts to publish the transaction that is being published again (0 when none). */
+  redeliveryCount: number
+}
+
+/**
+ * How far an {@link IOutboxConsumer} is behind.
+ */
+type OutboxLag = {
+  /** The main outbox (logical replication). */
+  replication: ReplicationLag
+  /** The async outbox, `null` when the consumer has none. */
+  asyncOutbox: PollingOutboxLag | null
+}
+
+/**
  * Interface for the Outbox Consumer.
  *
  * This is the main interface for interacting with Hermes PostgreSQL.
@@ -289,6 +324,12 @@ type IOutboxConsumer<Message extends JSONValue> = {
   getDbConnection(): Sql
   /** Gets the consumer configuration parameters */
   getCreationParams(): DeepReadonly<ConsumerCreationParams<Message>>
+  /**
+   * Reads how far the consumer is behind, e.g. for the gauges of a metrics library. Call it after `start()`.
+   *
+   * @param options.countLimit - Count at most this many undelivered messages of the async outbox (default: `10000`)
+   */
+  getLag(options?: { countLimit?: number }): Promise<OutboxLag>
 }
 
 /**
@@ -355,9 +396,11 @@ export type {
   IOutboxConsumer,
   MessageEnvelope,
   NowFunction,
+  OutboxLag,
   Publish,
   PublishOptions,
   QueryExecutor,
+  ReplicationLag,
   Start,
   Stop,
   OutboxTransaction,

@@ -212,14 +212,17 @@ export {
   type JSONValue,
   type MessageEnvelope,
   type NowFunction,
+  type OutboxLag,
   type Publish,
   type PublishOptions,
   type QueryExecutor,
+  type ReplicationLag,
   type Start,
   type Stop,
   type OutboxTransaction,
 } from './common/types.js'
 export { createOutboxConsumer } from './outbox/createOutboxConsumer.js'
+export { createOutboxMetrics, type OutboxMetricsParams } from './outbox/createOutboxMetrics.js'
 export { OutboxConsumer } from './outbox/OutboxConsumer.js'
 export { createPollingStore, type PollingStoreScope } from './asyncOutbox/createPollingStore.js'
 export {

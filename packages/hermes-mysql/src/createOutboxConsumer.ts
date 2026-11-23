@@ -48,6 +48,8 @@ import { type ConsumerCreationParams, type JSONValue, type OutboxConsumer } from
  * await connection.commit()
  * ```
  */
+const DefaultLagCountLimit = 10_000
+
 const createOutboxConsumer = <Message extends JSONValue>(
   params: ConsumerCreationParams<Message>,
 ): OutboxConsumer<Message> => {
@@ -92,6 +94,7 @@ const createOutboxConsumer = <Message extends JSONValue>(
           retry: params.retry,
           onFailedPublish: params.onFailedPublish,
           onDbError: params.onDbError,
+          onPoll: params.onPoll,
         })
 
         if (params.migrate !== false) {
@@ -147,6 +150,14 @@ const createOutboxConsumer = <Message extends JSONValue>(
     },
 
     getDbConnection: getPool,
+
+    async getLag(options) {
+      const countLimit = options?.countLimit ?? DefaultLagCountLimit
+
+      assert(Number.isInteger(countLimit) && countLimit >= 1, '`countLimit` has to be a positive integer.')
+
+      return createPollingStore<Message>(getPool, { consumerName, partitionKey }).getLag({ countLimit })
+    },
   }
 }
 
