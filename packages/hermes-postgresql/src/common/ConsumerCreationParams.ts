@@ -3,7 +3,7 @@ import { Options, PostgresType } from 'postgres'
 import { AsyncOrSync } from 'ts-essentials'
 import { UseAsyncOutboxPolicy } from '../policies/useBasicAsyncStoragePolicy.js'
 import { PublishingQueue } from '../publishingQueue/publishingQueue.js'
-import { HermesMessageEnvelope, JSONValue, NowFunction } from './types.js'
+import { ErrorCallback, HermesMessageEnvelope, JSONValue, NowFunction } from './types.js'
 
 /**
  * Configuration parameters for creating an outbox consumer.
@@ -103,15 +103,17 @@ type ConsumerCreationParams<Message extends JSONValue> = {
   serialization?: boolean
 
   /**
-   * Callback invoked when message publishing fails.
+   * Called when `publish` throws. The transaction is published again after `waitAfterFailedPublish`. An error it throws
+   * is ignored. The async outbox takes its own `onFailedPublish` (see {@link useBasicAsyncOutboxConsumerPolicy}).
    *
-   * @param error - The error that occurred
+   * @param error - The error that `publish` threw
    * @defaultValue No-op function
    */
   onFailedPublish?: ErrorCallback
 
   /**
-   * Callback invoked when a database error occurs.
+   * Not called by the main outbox yet. The async outbox takes its own `onDbError` (see
+   * {@link useBasicAsyncOutboxConsumerPolicy}).
    *
    * @param error - The database error
    * @defaultValue No-op function

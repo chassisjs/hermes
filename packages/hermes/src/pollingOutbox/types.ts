@@ -168,7 +168,7 @@ type PollingOutboxLag = {
   isPendingExact: boolean
   /**
    * The number of counted undelivered messages that failed at least once. When {@link isPendingExact} is `false`, it
-   * can include one message more than `pending`.
+   * can include one message beyond the counted ones.
    */
   failing: number
   /** The number of partitions with undelivered messages. */

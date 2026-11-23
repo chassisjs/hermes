@@ -105,6 +105,8 @@ An error thrown by `onPoll` is ignored, so a broken metrics library does not sto
 - **`onFailedPublish(error)`** is called when `publish` throws. The message is retried later (see [Retries](./polling-outbox.md#retries)).
 - **`onDbError(error)`** is called when a query fails, e.g. when the database is not available. The outbox tries again after `pollInterval`.
 
+In Hermes PostgreSQL, the async outbox takes its own handlers: `useBasicAsyncOutboxConsumerPolicy(interval, { onFailedPublish, onDbError })`. The main outbox calls `onFailedPublish` of the consumer and publishes the transaction again after `waitAfterFailedPublish`. It does not call `onDbError` yet, so watch `redeliveryCount` and the age of its oldest pending transaction too.
+
 ```typescript
 const outbox = createOutboxConsumer({
   // ...
@@ -162,7 +164,7 @@ The gauges read the lag (`outbox.getLag()`) once per collection of the metrics, 
 In Hermes PostgreSQL, `createOutboxMetrics` records the main outbox and the async outbox. Its `getLag()` needs a started consumer, so create the metrics after `start()`, and call `dispose()` before `stop()`:
 
 ```typescript
-import { type PollingOutboxMetrics } from '@chassisjs/hermes'
+import { Duration, type PollingOutboxMetrics } from '@chassisjs/hermes'
 import {
   createOutboxConsumer,
   createOutboxMetrics,
@@ -212,7 +214,7 @@ await stop()
 
 The ages are 0 when nothing is waiting. The duration histograms use buckets from 5 ms to 60 s.
 
-Exported to Prometheus, the names become e.g. `hermes_outbox_oldest_pending_message_age_seconds` and `hermes_outbox_messages_published_total`.
+Exported to Prometheus, the names get the unit and the type as suffixes, e.g. `hermes_outbox_oldest_pending_message_age_seconds`, `hermes_outbox_messages_published_total` and `hermes_outbox_replication_wal_bytes`. Check the exact names in your exporter: e.g. `slot.active` (unit `1`) can get a `_ratio` suffix.
 
 ### Without OpenTelemetry
 
