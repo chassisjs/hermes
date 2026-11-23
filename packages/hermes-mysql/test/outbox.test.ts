@@ -1,11 +1,13 @@
 import { Duration, type PollingOutboxPoll } from '@chassisjs/hermes'
 import { afterAll, afterEach, beforeAll, describe, expect, jest, test } from '@jest/globals'
 import { CompiledQuery, Kysely, MysqlDialect } from 'kysely'
+import { MeterProvider, MetricReader, type MetricData } from '@opentelemetry/sdk-metrics'
 import { createPool as createCallbackPool } from 'mysql2'
 import { type Pool, type PoolOptions, type RowDataPacket } from 'mysql2/promise'
 import { setTimeout } from 'node:timers/promises'
 import {
   createOutboxConsumer,
+  createOutboxMetrics,
   createPollingPool,
   createPollingStore,
   type ConsumerCreationParams,
@@ -848,6 +850,95 @@ describe('Lag', () => {
 
       expect(polls.every(({ failed, isClaimLost }) => failed === 0 && !isClaimLost)).toBe(true)
       expect(await outbox.getLag()).toMatchObject({ oldestPendingAge: null, pending: 0 })
+    })
+  })
+
+  test('createOutboxMetrics records the lag and the polls with OpenTelemetry', async () => {
+    await mysql.withDatabase(async ({ options, pool }) => {
+      class TestReader extends MetricReader {
+        protected async onShutdown() {}
+        protected async onForceFlush() {}
+      }
+
+      const reader = new TestReader()
+      const meter = new MeterProvider({ readers: [reader] }).getMeter('test')
+      const collect = async () => {
+        const { resourceMetrics, errors } = await reader.collect()
+
+        expect(errors).toEqual([])
+
+        return new Map<string, MetricData>(
+          resourceMetrics.scopeMetrics.flatMap(({ metrics }) =>
+            metrics.map((metric) => [metric.descriptor.name, metric]),
+          ),
+        )
+      }
+      const valueOf = (metrics: Map<string, MetricData>, name: string) => metrics.get(name)?.dataPoints[0]?.value
+      let isBrokerUp = false
+      const outbox = createConsumer(
+        options,
+        () => {
+          if (!isBrokerUp) {
+            throw new Error('broker is down')
+          }
+        },
+        { onPoll: (poll) => outboxMetrics.onPoll(poll), retry: () => Duration.ofMiliseconds(50) },
+      )
+      const errors: unknown[] = []
+
+      await migrate(pool)
+
+      const outboxMetrics = createOutboxMetrics({
+        meter,
+        outbox,
+        attributes: { 'hermes.consumer.name': 'app' },
+        onError: (error) => errors.push(error),
+      })
+
+      await outbox.queue([envelope('m1'), envelope('m2')])
+      await pool.query("UPDATE `hermes_outbox` SET `added_at` = NOW(6) - INTERVAL 90 SECOND WHERE `message_id` = 'm1'")
+
+      const before = await collect()
+
+      expect(errors).toEqual([])
+      expect(valueOf(before, 'hermes.outbox.oldest_pending_message.age')).toBeGreaterThanOrEqual(90)
+      expect(valueOf(before, 'hermes.outbox.pending_messages')).toBe(2)
+      expect(valueOf(before, 'hermes.outbox.pending_partitions')).toBe(1)
+      expect(before.get('hermes.outbox.pending_messages')?.dataPoints[0].attributes).toEqual({
+        'hermes.consumer.name': 'app',
+      })
+
+      const stop = await outbox.start()
+
+      await setTimeout(300)
+      isBrokerUp = true
+
+      const deadline = Date.now() + Duration.ofSeconds(20).ms
+
+      while ((await outbox.getLag()).pending > 0 && Date.now() < deadline) {
+        await setTimeout(50)
+      }
+
+      await stop()
+
+      const after = await collect()
+
+      expect(valueOf(after, 'hermes.outbox.oldest_pending_message.age')).toBe(0)
+      expect(valueOf(after, 'hermes.outbox.pending_messages')).toBe(0)
+      expect(valueOf(after, 'hermes.outbox.messages.published')).toBe(2)
+      expect(valueOf(after, 'hermes.outbox.messages.failed')).toBeGreaterThanOrEqual(1)
+      expect(valueOf(after, 'hermes.outbox.polls')).toBeGreaterThanOrEqual(2)
+
+      const getLag = jest.spyOn(outbox, 'getLag')
+
+      await collect()
+
+      expect(getLag).toHaveBeenCalledTimes(1)
+
+      outboxMetrics.dispose()
+      await collect()
+
+      expect(getLag).toHaveBeenCalledTimes(1)
     })
   })
 })

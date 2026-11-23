@@ -1,4 +1,5 @@
 export { createOutboxConsumer } from './createOutboxConsumer.js'
+export { createOutboxMetrics, type OutboxMetricsParams } from './createOutboxMetrics.js'
 export { createPollingStore, type PollingStoreScope } from './createPollingStore.js'
 export { migrate, type Migration } from './migrate.js'
 export { createPollingPool } from './sql.js'

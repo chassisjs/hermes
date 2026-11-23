@@ -130,30 +130,34 @@ process.on('warning', (warning) => {
 
 ## OpenTelemetry
 
-`createPollingOutboxMetrics` of `@chassisjs/hermes` records the lag and the polls with OpenTelemetry. Hermes does not depend on `@opentelemetry/api`: pass the `Meter` of your application, and configure the exporter (OTLP, Prometheus, ...) as you do for the rest of the application.
+`createOutboxMetrics` of Hermes MySQL and Hermes PostgreSQL records the lag and the polls with OpenTelemetry. Hermes does not depend on `@opentelemetry/api`: pass the `Meter` of your application, and configure the exporter (OTLP, Prometheus, ...) as you do for the rest of the application.
 
 ```typescript
 import { metrics } from '@opentelemetry/api'
-import { createPollingOutboxMetrics } from '@chassisjs/hermes'
-import { createOutboxConsumer } from '@chassisjs/hermes-mysql'
+import { createOutboxConsumer, createOutboxMetrics } from '@chassisjs/hermes-mysql'
 
-const outboxMetrics = createPollingOutboxMetrics({
-  meter: metrics.getMeter('orders'),
-  attributes: { 'hermes.consumer.name': 'orders' },
-  getLag: () => outbox.getLag(),
-  onError: (error) => logger.warn({ error }, 'Reading the lag of the outbox failed'),
-})
 const outbox = createOutboxConsumer({
   // ...
   consumerName: 'orders',
-  onPoll: outboxMetrics.onPoll,
+  onPoll: (poll) => outboxMetrics.onPoll(poll),
 })
+const outboxMetrics = createOutboxMetrics({
+  meter: metrics.getMeter('orders'),
+  outbox,
+  attributes: { 'hermes.consumer.name': 'orders' },
+  onError: (error) => logger.warn({ error }, 'Reading the lag of the outbox failed'),
+})
+const stop = await outbox.start()
 
 // on shutdown
 outboxMetrics.dispose()
+await stop()
+await outbox.getDbConnection().end()
 ```
 
-The gauges read the lag once per collection of the metrics. Without `getLag`, only the metrics of `onPoll` are recorded.
+The gauges read the lag (`outbox.getLag()`) once per collection of the metrics, so how often depends on the metric reader of your application, e.g. `exportIntervalMillis` of `PeriodicExportingMetricReader`. In Hermes MySQL, `getLag()` does not need `start()`, so the metrics can be created before it. `onPoll` is called only after `start()`, so it can refer to `outboxMetrics` declared below it.
+
+`createPollingOutboxMetrics` of `@chassisjs/hermes` is the adapter under both, for a polling outbox with your own store: it takes `getLag` as a function.
 
 In Hermes PostgreSQL, `createOutboxMetrics` records the main outbox and the async outbox. Its `getLag()` needs a started consumer, so create the metrics after `start()`, and call `dispose()` before `stop()`:
 
