@@ -48,7 +48,7 @@ Delivery is **at-least-once**. An instance can die after publishing a message an
 
 ## Lag and metrics
 
-`getLag()` of a consumer reads how far it is behind (the age of the oldest undelivered message, the undelivered and failing messages, the partitions with undelivered messages), and `onPoll` reports every poll. `createPollingOutboxMetrics` records both with OpenTelemetry. See [Observability](./observability.md).
+`getLag()` of a consumer reads how far it is behind (the age of the oldest undelivered message, the undelivered and failing messages, the partitions with undelivered messages), and `onPoll` reports every poll. `createOutboxMetrics` of Hermes MySQL and Hermes PostgreSQL records both with OpenTelemetry. See [Observability](./observability.md).
 
 ## The async outbox of Hermes PostgreSQL
 
