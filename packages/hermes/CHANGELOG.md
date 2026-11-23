@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# [1.0.0-alpha.28](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.27...v1.0.0-alpha.28) (2026-11-23)
+
+### Bug Fixes
+
+- `createPollingOutbox` no longer stops publishing when a claim takes more than two thirds of the lease (e.g. a slow query, or big partitions read by `usePartitionOrderingPolicy`). Every lane used to return at once without publishing, and every next poll did the same. Now a stale claim is renewed once before publishing, and the lanes are published only when the renewal confirms it; a lost or failed renewal still publishes nothing.
+
 # [1.0.0-alpha.24](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.23...v1.0.0-alpha.24) (2026-11-05)
 
 ### Features

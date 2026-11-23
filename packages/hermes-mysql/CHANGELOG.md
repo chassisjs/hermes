@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# [1.0.0-alpha.28](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.27...v1.0.0-alpha.28) (2026-11-23)
+
+### Bug Fixes
+
+- `claimPartitions` finds the partitions with undelivered messages with a loose index scan of `idx_hermes_outbox_pending_partitions` (one index lookup per partition). The recursive CTE before it scanned all the undelivered messages for every partition in MySQL, e.g. 27 s for 28,000 messages in 1,800 partitions, so the outbox published almost nothing on a large backlog.
+- Needs `@chassisjs/hermes` `~1.0.0-alpha.28`, which publishes after a claim that took more than two thirds of the lease.
+
 # [1.0.0-alpha.27](https://github.com/chassisjs/hermes/compare/v1.0.0-alpha.26...v1.0.0-alpha.27) (2026-11-18)
 
 ### Features
